@@ -1,0 +1,83 @@
+# Photone
+
+A raw photo editor for Linux, built around a color wheel: your photo's colors show up on the
+wheel, and you grade by grabbing one and moving it.
+
+**Built to be fast and responsive.** Every adjustment runs on the GPU, so sliders, zoom and
+pan answer at once, even on 33-megapixel raw files and with a folder of thousands of photos.
+
+![Photone, the Edit screen](docs/images/edit.png)
+
+**Status: early, in active development.** I use it on my own photos every day, but
+expect rough edges.
+
+## What it does
+
+- **Opens raw files** from Sony, Canon, Nikon, Fujifilm, Panasonic, Olympus/OM, Pentax and
+  DNG, plus JPEG, PNG and TIFF.
+- **Everything on the GPU.** Every slider is live; zoom and pan are instant.
+- **Exposure and tone:** exposure, contrast, brightness, highlights, midtones, shadows,
+  whites, blacks, a tone curve, and a histogram with clipping stripes.
+- **Color:** white balance (a pad, kelvin sliders, pick a neutral from the photo), saturation,
+  vibrance, a per-hue color EQ, a chroma curve.
+- **The Tone Wheel:** click a color in the photo or on the wheel to pin it, then drag the
+  pin to shift that color and those near it. Pins can be limited to highlights, midtones or
+  shadows.
+- **Masks:** radial, linear, or painted with a brush. Each mask has its own exposure, color
+  and curve settings, and its own pins.
+- **Crop, straighten, rotate.**
+- **Library:** add folders (nothing is copied or moved), browse by folder, month or camera,
+  pick, reject, star and label.
+- **Checkpoints and undo:** save named states of an edit; undo history is kept per photo.
+- **Export** to JPEG, PNG or TIFF (8 or 16 bit): the open photo from the Export page, or
+  select several and right click to export them all.
+- **SDR and HDR** display, switchable, where the desktop supports HDR.
+
+Your originals are never touched. Edits live in Photone's own catalog
+(`~/.local/share/photone/`).
+
+![The Tone Wheel](docs/images/tone-wheel.png)
+
+![Color EQ and tone curve](docs/images/color.png)
+
+![A radial mask with its own exposure](docs/images/masks.png)
+
+![The library](docs/images/library.png)
+
+## Install and run
+
+You need Linux (Wayland or X11), a GPU, and [uv](https://docs.astral.sh/uv/).
+
+```sh
+git clone https://github.com/TominoCZ/Photone.git
+cd Photone
+./run.sh                # start in the library
+./run.sh photo.ARW      # or open a photo directly
+./run.sh --hdr          # start in HDR, where the desktop has it
+```
+
+The first run downloads Python, Qt and the other packages. System packages are listed in
+[docs/deps.md](docs/deps.md).
+
+## Handy keys
+
+| Key | Does |
+|---|---|
+| Ctrl+1 / 2 / 3 | Library / Edit / Export |
+| ← → | Previous / next photo (hold to run through them) |
+| Wheel, drag | Zoom about the pointer, move the photo |
+| Middle click, double click | Fit; 1:1 and back |
+| B (hold) | Show the photo without its edit |
+| H (hold) | Show what the chosen pin or mask covers |
+| P / X / U, 1–5 | Pick / reject / clear, stars |
+| Ctrl+click, Shift+click | Select several photos (library, filmstrip); right click for the menu |
+| Ctrl+Z, Ctrl+Shift+Z | Undo, redo |
+| Double click a slider | Reset it. Shift while dragging: finer |
+
+## Develop
+
+```sh
+./run.sh check    # the checks
+./run.sh shots    # render every screen off-screen and audit the layout
+./run.sh lint     # ruff
+```
