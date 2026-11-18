@@ -422,7 +422,12 @@ Rectangle {
     // What a mask is called: the name it was given, or its kind and its place in the list.
     function maskName(number) {
         const mask = session.masks[number - 1]
-        return !mask ? "Mask" : mask.name || ({ radial: "Radial ", linear: "Linear ", brush: "Brush " })[mask.kind] + number
+        if (!mask) return "Mask"
+        // Counted among its own kind: Radial 1, Linear 1, Radial 2. (By its place in the whole
+        // list it read Radial 1, Linear 2, Radial 3; the owner: "the name numbering doesnt
+        // really make sense".)
+        const nth = session.masks.slice(0, number).filter(m => m.kind === mask.kind).length
+        return mask.name || ({ radial: "Radial ", linear: "Linear ", brush: "Brush " })[mask.kind] + nth
     }
     // A name being typed in a list's row, in the name's place: Enter or leaving the field
     // takes it (docs/PLAN.md §5), Escape does not. (The owner: "rename masks and checkpoints".)
