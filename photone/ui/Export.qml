@@ -13,6 +13,15 @@ Rectangle {
     property var lut: null   // the open photo's LUT as a picture (PhotoView.lut), or none
     property bool ready: false   // that picture is there
     signal folderAsked()
+    signal markFileAsked()   // choose the picture that is the watermark
+    // The watermark's scale and opacity while their sliders are dragged: this page's own
+    // numbers, which the watermark on the photo here follows at once; Python is told when a
+    // slider is let go.
+    property real markScale: 4
+    property real markStrength: 60
+    function markTaken() { markScale = exporter.mark.size; markStrength = exporter.mark.strength }
+    Component.onCompleted: markTaken()
+    Connections { target: exporter; function onMarkChanged() { root.markTaken() } }
     signal editAsked(string photo)   // open that photo in Edit
     property string kind: "jpeg"
     property real quality: 90
@@ -73,6 +82,7 @@ Rectangle {
             anchors.centerIn: parent
             source: root.picture; painted: root.painted || root.picture; lutPicture: root.lut
             Local { over: shot; layers: session.maskLayers }
+            Mark { wide: session.fullWidth; high: session.fullHeight; scale: root.markScale; strength: root.markStrength }
         }
         GridView {
             id: sheet
@@ -189,6 +199,128 @@ Rectangle {
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.folderAsked() }
             }
             PushButton { id: choose; objectName: "export-choose"; anchors { right: parent.right; verticalCenter: parent.verticalCenter } label: "Choose…"; onPressed: root.folderAsked() }
+        }
+        // The watermark every export gets: nothing, some text, or a picture; where on the
+        // photo, how large, how strong. Shown here on the photo, and in Edit unless hidden there.
+        Heading { text: "WATERMARK" }
+        Rectangle {
+            width: parent.width; height: 30; radius: 7; color: Theme.raised
+            Row {
+                anchors.centerIn: parent
+                Repeater {
+                    model: [["none", "None"], ["text", "Text"], ["picture", "Picture"]]
+                    Segment {
+                        required property var modelData
+                        objectName: "mark-kind:" + modelData[0]
+                        width: (form.width - 4) / 3; label: modelData[1]; on: exporter.mark.kind === modelData[0]; onChosen: exporter.setMark({ kind: modelData[0] })
+                    }
+                }
+            }
+        }
+        Item { width: 1; height: 8; visible: exporter.mark.kind !== "none" }
+        Rectangle {
+            visible: exporter.mark.kind === "text"
+            width: parent.width; height: 30; radius: 6; color: Theme.bg; border { width: 1; color: markText.activeFocus ? Theme.text : Theme.faint }
+            TextInput {
+                id: markText
+                objectName: "mark-text"
+                anchors { fill: parent; leftMargin: 10; rightMargin: 10 }
+                verticalAlignment: TextInput.AlignVCenter; clip: true; maximumLength: 120
+                color: Theme.text; selectionColor: Theme.faint; selectedTextColor: Theme.text
+                font.family: Theme.font; font.pixelSize: Theme.fontSize
+                Accessible.name: "The watermark's text"
+                text: exporter.mark.text
+                onTextEdited: exporter.setMark({ text: text })
+                Keys.onReturnPressed: (event) => { root.forceActiveFocus(); event.accepted = true }
+                Keys.onEscapePressed: (event) => { root.forceActiveFocus(); event.accepted = true }
+                Label { visible: parent.text === "" && !parent.activeFocus; anchors.verticalCenter: parent.verticalCenter; text: "© Your name"; color: Theme.faint }
+            }
+        }
+        Item {
+            visible: exporter.mark.kind === "picture"
+            width: parent.width; height: 34
+            Rectangle {
+                anchors { left: parent.left; right: markChoose.left; rightMargin: 8; verticalCenter: parent.verticalCenter }
+                height: 30; radius: 6; color: Theme.bg; border { width: 1; color: Theme.line }
+                Label {
+                    objectName: "mark-file"
+                    anchors { left: parent.left; right: parent.right; leftMargin: 10; rightMargin: 10; verticalCenter: parent.verticalCenter }
+                    elide: Text.ElideMiddle; font.pixelSize: 12
+                    // (A file that is no picture any more: said here, and no watermark is drawn.)
+                    readonly property bool lost: exporter.mark.file !== "" && (exporter.mark, exporter.markPlace(1000, 1000)).length === 0
+                    color: lost ? Theme.red : exporter.mark.file === "" ? Theme.faint : Theme.dim
+                    text: exporter.mark.file === "" ? "No picture chosen yet" : (lost ? "Cannot be read: " : "") + exporter.mark.file
+                }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.markFileAsked() }
+            }
+            PushButton { id: markChoose; objectName: "mark-choose"; anchors { right: parent.right; verticalCenter: parent.verticalCenter } label: "Choose…"; onPressed: root.markFileAsked() }
+        }
+        Item {
+            visible: exporter.mark.kind !== "none"
+            width: parent.width; height: 118
+            // Where on the photo: a rectangle with nine points, its corners, the middles of its
+            // sides and its middle (the owner's wish). The point chosen is also what the
+            // watermark is held by: its own corner, side or middle lies there.
+            Item {
+                id: places
+                objectName: "mark-places"
+                y: 8; width: 100; height: 70
+                Accessible.role: Accessible.Grouping; Accessible.name: "Where on the photo"
+                Rectangle { x: 8; y: 8; width: parent.width - 16; height: parent.height - 16; radius: 3; color: Theme.bg; border { width: 1; color: Theme.faint } }
+                Repeater {
+                    model: 9
+                    Item {
+                        required property int index
+                        readonly property bool on: exporter.mark.place === index
+                        objectName: "mark-place:" + index
+                        x: index % 3 * (places.width - 16) / 2 - 3; y: Math.floor(index / 3) * (places.height - 16) / 2 - 3; width: 22; height: 22
+                        Accessible.role: Accessible.RadioButton; Accessible.checked: on
+                        Accessible.name: ["Top", "Middle", "Bottom"][Math.floor(index / 3)] + " " + ["left", "middle", "right"][index % 3]
+                        Rectangle {
+                            anchors.centerIn: parent; width: parent.on ? 12 : 8; height: width; radius: width / 2
+                            color: parent.on ? Theme.mark : overPlace.containsMouse ? Theme.text : Theme.dim
+                            border { width: parent.on ? 0 : 1; color: Theme.bg }
+                        }
+                        MouseArea { id: overPlace; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: exporter.setMark({ place: index }) }
+                    }
+                }
+            }
+            Column {
+                anchors { left: places.right; leftMargin: 16; right: parent.right }
+                // (In steps too fine to see: at half a percent a step the watermark jumped by
+                // 23 px on a 33 MP photo; the owner: "still isnt very smooth".)
+                ParamSlider {
+                    objectName: "mark-size"
+                    width: parent.width
+                    name: "Scale"; unit: "%"; from: 1; to: 30; neutral: 4; step: 0.01; digits: 1; signed: false; logarithmic: true
+                    value: root.markScale; onMoved: (v) => root.markScale = v
+                    onReleased: exporter.setMark({ size: root.markScale }); onReset: exporter.setMark({ size: 4 })
+                }
+                ParamSlider {
+                    objectName: "mark-strength"
+                    width: parent.width
+                    name: "Opacity"; unit: "%"; from: 5; to: 100; neutral: 0; step: 0.1; digits: 0; signed: false
+                    value: root.markStrength; onMoved: (v) => root.markStrength = v
+                    onReleased: exporter.setMark({ strength: root.markStrength }); onReset: exporter.setMark({ strength: 60 })
+                }
+            }
+            Rectangle {   // (a switch as the Edit screen's are, drawn here: this file has no OnOff)
+                objectName: "mark-shown"
+                anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                height: 28; color: "transparent"
+                Accessible.role: Accessible.CheckBox; Accessible.name: "Show it on the photo in Edit"; Accessible.checked: exporter.markShown
+                Label { anchors.verticalCenter: parent.verticalCenter; text: "Show it on the photo in Edit"; color: exporter.markShown ? Theme.text : Theme.dim }
+                Rectangle {
+                    anchors { right: parent.right; verticalCenter: parent.verticalCenter }
+                    width: 36; height: 20; radius: 10
+                    color: exporter.markShown ? Theme.mark : Theme.bg; border { width: 1; color: exporter.markShown ? Theme.mark : Theme.faint }
+                    Rectangle {
+                        x: exporter.markShown ? parent.width - width - 3 : 3; anchors.verticalCenter: parent.verticalCenter
+                        width: 14; height: 14; radius: 7; color: exporter.markShown ? Theme.bg : Theme.dim
+                    }
+                }
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: exporter.setMarkShown(!exporter.markShown) }
+            }
         }
         // (A file that is there is never replaced: export.destination. It is not said here; the
         // owner found the sentence, and the one under the button, awkward. A finished export

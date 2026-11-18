@@ -43,8 +43,9 @@ QtObject {
     // and a color of its own for its icon and title (the owner: "each card to actually have
     // its own icon, maybe even its own unique color"; of a trial of both: "looks good, but
     // the color order should be based off of the Adjust tab card order so its like a
-    // continuous rainbow"). So Adjust runs yellow, green, teal, blue, purple, pink,
-    // orange from Light down to the Tone Wheel (he then: "should start from the yellow"). The one place the chrome has color: small, and on
+    // continuous rainbow"). So Adjust runs yellow, green, teal, blue, purple, magenta,
+    // then red, orange and amber down to Film grain, back toward the yellow it started from
+    // (he then: "should start from the yellow"). The one place the chrome has color: small, and on
     // names only, never round the photo.
     readonly property var cards: ({
         light: ["M7.2 12.6 a5 5 0 1 1 5.6 0 V14.6 H7.2 Z M8.2 17.4 H11.8", "#e0c25a"],
@@ -53,11 +54,11 @@ QtObject {
         curve: ["M3.5 3 V16.5 H17 M6 14 C10 14 10.5 6 16 5.5", "#4fcfc0"],
         saturation: ["M10 3 C10 3 4.5 9 4.5 12.2 a5.5 5.5 0 0 0 11 0 C15.5 9 10 3 10 3 Z", "#62a8e8"],
         eq: ["M5 3 V17 M10 3 V17 M15 3 V17 M3.4 7 H6.6 M8.4 12.5 H11.6 M13.4 6 H16.6", "#a583e6"],
-        chroma: ["M3.5 16.5 C10 16.5 7 4 16.5 3.5 M3.5 16.4 V16.6 M16.5 3.4 V3.6", "#e56a9c"],
-        wheel: ["M10 3 a7 7 0 1 0 0.01 0 Z M10 7.6 a2.4 2.4 0 1 0 0.01 0 Z", "#e8935a"],
-        detail: ["M10 3 L17 16.5 H3 Z M10 8.5 L13 14 H7 Z", "#e2685f"],
-        lens: ["M10 3 a7 7 0 1 0 0.01 0 Z M10 6.2 a3.8 3.8 0 1 0 0.01 0 Z M7.6 7.6 L4.9 4.9", "#d98a6a"],
-        grain: ["M5 4.5 a1 1 0 1 0 .01 0 Z M11 3.5 a1 1 0 1 0 .01 0 Z M15.5 7.5 a1 1 0 1 0 .01 0 Z M8 9 a1 1 0 1 0 .01 0 Z M4 13 a1 1 0 1 0 .01 0 Z M12.5 12 a1 1 0 1 0 .01 0 Z M9 15.5 a1 1 0 1 0 .01 0 Z M15.5 15 a1 1 0 1 0 .01 0 Z", "#cdb38f"],
+        chroma: ["M3.5 16.5 C10 16.5 7 4 16.5 3.5 M3.5 16.4 V16.6 M16.5 3.4 V3.6", "#d66ac1"],
+        wheel: ["M10 3 a7 7 0 1 0 0.01 0 Z M10 7.6 a2.4 2.4 0 1 0 0.01 0 Z", "#e45b67"],
+        detail: ["M10 3 L17 16.5 H3 Z M10 8.5 L13 14 H7 Z", "#f77647"],
+        lens: ["M10 3 a7 7 0 1 0 0.01 0 Z M10 6.2 a3.8 3.8 0 1 0 0.01 0 Z M7.6 7.6 L4.9 4.9", "#f4993c"],
+        grain: ["M5 4.5 a1 1 0 1 0 .01 0 Z M11 3.5 a1 1 0 1 0 .01 0 Z M15.5 7.5 a1 1 0 1 0 .01 0 Z M8 9 a1 1 0 1 0 .01 0 Z M4 13 a1 1 0 1 0 .01 0 Z M12.5 12 a1 1 0 1 0 .01 0 Z M9 15.5 a1 1 0 1 0 .01 0 Z M15.5 15 a1 1 0 1 0 .01 0 Z", "#f0b135"],
         presets: ["M5.5 3 H14.5 V17 L10 13.6 L5.5 17 Z", "#c9c9cf"],
         mono: ["M10 3 a7 7 0 1 0 0.01 0 Z M10 3 V17 M10 6.5 H15.9 M10 10 H17 M10 13.5 H15.9", "#c9c9cf"],
         crop: ["M6 2 V14 H18 M2 6 H14 V18", "#c9c9cf"],

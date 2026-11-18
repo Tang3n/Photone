@@ -940,8 +940,8 @@ class Session(QObject):
         generation, index, size = address.split("/")
         blank = QImage(*self.BLANK, QImage.Format.Format_RGBA16FPx4)
         blank.fill(0)
-        if generation in ("painted", "lut", "export"):
-            return self._other(generation, index) or blank
+        if generation in ("painted", "lut", "export", "mark"):
+            return self._other(generation, index, size) or blank
         if int(generation) != self._generation:
             return blank  # a photo the user has already left: not worth decoding
         if index == "chart":  # the test chart in the photo's place: no file, nothing to describe
@@ -959,9 +959,11 @@ class Session(QObject):
             self._small = (int(generation), small)
         return picture
 
-    def _other(self, kind: str, which: str) -> QImage | None:
-        """A picture that is not the open photo's own: its painted masks, a LUT, or the photo
-        an export is being made of (photone/export.py)."""
+    def _other(self, kind: str, which: str, size: str = "") -> QImage | None:
+        """A picture that is not the open photo's own: its painted masks, a LUT, the
+        watermark, or the photo an export is being made of (photone/export.py)."""
+        if kind == "mark":
+            return self.exporter.mark_picture() if self.exporter else None
         if kind == "painted":
             return self._painted_at(which)
         if kind == "lut":
@@ -1570,6 +1572,8 @@ class Session(QObject):
         """Write the edit to the catalog now (also called a moment after every change, when
         another photo is opened, and at exit)."""
         self.saver.stop()
+        if self.exporter:
+            self.exporter.keep_mark()  # (the watermark, should it still be waiting to be written)
         if not (self._unwritten and self.photos):
             return
         try:

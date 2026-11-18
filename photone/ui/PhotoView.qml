@@ -205,6 +205,9 @@ Item {
         reach: view.reach
         showMask: view.showMask > 0 ? view.showMask : maskFrame.tinting ? -view.mask : 0
         Local { over: photo; layers: session.maskLayers }
+        // The watermark an export will have, where it will have it (not while the frame is
+        // being set, when what is on show is not the frame).
+        Mark { visible: exporter.markShown && session.panels.tool !== "crop"; wide: session.fullWidth; high: session.fullHeight }
     }
 
     // The photo without its edit, left of a line that can be dragged (`split`: where the

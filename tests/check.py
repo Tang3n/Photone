@@ -662,6 +662,21 @@ def check_lens() -> None:
     assert edit.clean({"lensDistortion": True, "lensColor": "yes", "lensVignetting": False}) == {"lensVignetting": False}
 
 
+def check_mark() -> None:
+    """A watermark (photone/export.py): its settings read as untrusted, and where it goes."""
+    assert export.valid_mark(None) == export.MARK and export.valid_mark({"kind": "sticker", "place": True, "size": "big"}) == export.MARK
+    got = export.valid_mark({"kind": "text", "text": "x" * 500, "place": 11, "size": 0.2, "strength": 400, "more": 1})
+    assert got == {"kind": "text", "text": "x" * 120, "file": "", "place": 8, "size": 1.0, "strength": 100.0}
+    assert export.mark_edge(6000, 4000) == 120 == export.mark_edge(4000, 6000), "3 % of the shorter side"
+    at = [export.mark_at(place, 6000, 4000, 600, 200) for place in range(9)]
+    assert at[0] == (120, 120) and at[4] == (2700, 1900) and at[8] == (5280, 3680) and at[2] == (5280, 120) and at[6] == (120, 3680)
+    assert export.mark_base({**export.MARK, "kind": "none", "text": "x"}) is None
+    assert export.mark_base({**export.MARK, "kind": "text", "text": "   "}) is None
+    assert export.mark_base({**export.MARK, "kind": "picture", "file": "/nowhere/at/all.png"}) is None
+    assert export.mark_size({**export.MARK, "size": 10.0}, (800, 200), 6000, 4000) == (1600, 400), "as high as 10 % of the shorter side, its shape kept"
+    assert export.mark_size({**export.MARK, "size": 30.0}, (4000, 200), 600, 400) == (576, 29), "no wider than the picture less its edges: then lower too"
+
+
 def check_colors() -> None:
     """Saturation, the chroma curve and the color EQ (photone/edit.py): what each makes of a
     color, and all of them with the pins, in the shader's order."""
@@ -2460,6 +2475,28 @@ def check_shaders() -> None:
         assert shaders.compiled(file) == built, "unchanged source, same package"
 
 
+def check_kept() -> None:
+    """Only the part of a raw picture that the file calls the photo is kept, whichever way up."""
+    from types import SimpleNamespace as Sizes
+
+    canon = dict(width=5208, height=3476, left_margin=72, top_margin=52, crop_left_margin=84,
+                 crop_top_margin=64, crop_width=5184, crop_height=3456)  # 12 left, top, right; 8 below
+    span = lambda cut: (cut.start, cut.stop)  # noqa: E731
+    rows, columns = decode.kept(Sizes(**canon, flip=0), False)
+    assert (span(rows), span(columns)) == ((12, 3468), (12, 5196)), (rows, columns)
+    rows, columns = decode.kept(Sizes(**canon, flip=0), True)
+    assert (span(rows), span(columns)) == ((6, 1734), (6, 2598)), (rows, columns)
+    # Turned, the margins turn with it: a picture of the margins themselves, turned by numpy.
+    sensor = np.zeros((3476, 5208), bool)
+    sensor[12:3468, 12:5196] = True
+    for flip, turns in ((3, 2), (5, 1), (6, 3)):
+        assert np.rot90(sensor, turns)[decode.kept(Sizes(**canon, flip=flip), False)].all(), flip
+        assert np.rot90(sensor, turns)[decode.kept(Sizes(**canon, flip=flip), False)].size == sensor.sum(), flip
+    none = dict(canon, crop_left_margin=65535, crop_top_margin=65535, crop_width=0, crop_height=0)
+    rows, columns = decode.kept(Sizes(**none, flip=5), False)
+    assert (span(rows), span(columns)) == ((0, 5208), (0, 3476)), "no part named: all of it"
+
+
 def check_sample(path: Path) -> None:
     meta, pixels = decode.load(path)
     px = np.frombuffer(pixels.buf, np.float16).reshape(meta["height"], meta["width"], 4)
@@ -2512,6 +2549,7 @@ def main() -> None:
     check_lut()
     check_detail()
     check_lens()
+    check_mark()
     check_masks()
     check_white_balance()
     check_history()
@@ -2548,6 +2586,7 @@ def main() -> None:
     check_settings()
     check_headroom()
     check_raster()
+    check_kept()
     check_workers()
     check_no_orphan()
     check_surface_choice()

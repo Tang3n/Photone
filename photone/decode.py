@@ -105,6 +105,31 @@ def light_of(raw) -> list[float] | None:
     return [float(np.median(light)), float(np.percentile(top, TOP))]
 
 
+def kept(sizes, half: bool) -> tuple[slice, slice]:
+    """The part of a developed raw picture that is the photo: (rows, columns), of the picture
+    as it comes out, turned upright. A sensor records a few columns and rows more than the
+    camera calls the picture, and the outermost can hold anything (a Canon 700D's last
+    column, five times too bright: a blue line down the right edge of a dark photo; the
+    owner: "that should never happen"). The file says which part is meant, and that is what
+    the camera's own JPEG and every other developer show. All of it where the file names no
+    such part. At half size a margin of an odd width takes the pixel it has half of with it."""
+    wide, high = sizes.width, sizes.height
+    left, top = sizes.crop_left_margin - sizes.left_margin, sizes.crop_top_margin - sizes.top_margin
+    right, bottom = wide - left - sizes.crop_width, high - top - sizes.crop_height
+    if not sizes.crop_width or not sizes.crop_height or min(left, top, right, bottom) < 0:
+        left = top = right = bottom = 0
+    # Turned as the picture is (LibRaw's `flip`: 3 upside down, 5 a quarter left, 6 right).
+    turned = {3: (right, bottom, left, top), 5: (top, right, bottom, left),
+              6: (bottom, left, top, right)}
+    left, top, right, bottom = turned.get(sizes.flip, (left, top, right, bottom))
+    if sizes.flip in (5, 6):
+        wide, high = high, wide
+    by = 2 if half else 1
+    wide, high = (wide + by - 1) // by, (high + by - 1) // by
+    left, top, right, bottom = (-(-margin // by) for margin in (left, top, right, bottom))
+    return slice(top, high - bottom), slice(left, wide - right)
+
+
 def develop_raw(path: Path, half: bool) -> tuple[dict, np.ndarray]:
     """Developed no further than demosaicing and the camera's white balance: (h, w, 3) uint16.
 
@@ -114,8 +139,7 @@ def develop_raw(path: Path, half: bool) -> tuple[dict, np.ndarray]:
 
     try:
         with rawpy.imread(str(path)) as raw:
-            size = (raw.sizes.width, raw.sizes.height)  # before developing, which changes them
-            full = size[::-1] if raw.sizes.flip in (5, 6) else size  # turned on its side
+            sizes = raw.sizes  # before developing, which changes them
             about = camera(raw.camera_whitebalance, raw.rgb_xyz_matrix)
             light = light_of(raw)
             rgb = raw.postprocess(
@@ -124,6 +148,9 @@ def develop_raw(path: Path, half: bool) -> tuple[dict, np.ndarray]:
                 highlight_mode=rawpy.HighlightMode.Clip)
     except (rawpy.LibRawError, OSError) as e:
         raise Unreadable(f"{path.name}: {e}") from e
+    rows, columns = kept(sizes, False)
+    full = (columns.stop - columns.start, rows.stop - rows.start)
+    rgb = rgb[kept(sizes, half)]
     info = meta(path.name, rgb.shape[1], rgb.shape[0], full)
     # (With the camera's figures for the lens that was on it, where the file has them:
     # they travel with what is known of the camera, to wherever the shader's numbers are made.)

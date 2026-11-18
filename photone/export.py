@@ -15,8 +15,17 @@ from itertools import count
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Property, QBuffer, QObject, QSize, Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QColorSpace, QImage, QImageWriter
+from PySide6.QtCore import Property, QBuffer, QObject, QSize, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import (
+    QColor,
+    QColorSpace,
+    QFont,
+    QFontMetrics,
+    QImage,
+    QImageReader,
+    QImageWriter,
+    QPainter,
+)
 from PySide6.QtQuick import QQuickItem
 
 from photone import decode, edit, lut, shaders
@@ -110,6 +119,120 @@ def picture(pixels: np.ndarray, longest: int = 0) -> QImage:
     return image
 
 
+# A watermark: nothing, some text, or a picture from a file; in one of nine places of the
+# photo (0 top left … 8 bottom right, row by row), as high as `size` percent of the photo's
+# shorter side, as strong as `strength` percent. The same for every export, and kept.
+MARK = {"kind": "none", "text": "", "file": "", "place": 8, "size": 4.0, "strength": 60.0}
+MARK_SIDE = 8000  # a picture for a watermark is no larger than this a side
+
+
+def valid_mark(given) -> dict:
+    """A watermark's settings read from somewhere untrusted: what is not valid is as MARK
+    has it."""
+    given, out = given if isinstance(given, dict) else {}, dict(MARK)
+    if given.get("kind") in ("none", "text", "picture"):
+        out["kind"] = given["kind"]
+    for key, most in (("text", 120), ("file", 1000)):
+        if isinstance(given.get(key), str):
+            out[key] = given[key][:most]
+    if isinstance(given.get("place"), (int, float)) and not isinstance(given["place"], bool):
+        out["place"] = int(min(8, max(0, given["place"])))
+    for key, low, high in (("size", 1.0, 30.0), ("strength", 5.0, 100.0)):
+        value = given.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value == value:
+            out[key] = float(min(high, max(low, value)))
+    return out
+
+
+MARK_TALL = 200  # how high a watermark's text is drawn, to be scaled to what is asked
+
+
+def _mark_text(words: str) -> QImage:
+    """Text as a watermark, MARK_TALL high: white, with a dark copy behind it, so that it
+    reads on a bright sky too."""
+    font = QFont()
+    font.setPixelSize(MARK_TALL)
+    font.setBold(True)
+    metrics = QFontMetrics(font)
+    drop = MARK_TALL // 16
+    drawn = QImage(min(MARK_SIDE, metrics.horizontalAdvance(words) + 2 * drop),
+                   metrics.height() + drop, QImage.Format.Format_ARGB32_Premultiplied)
+    drawn.fill(0)
+    painter = QPainter(drawn)
+    painter.setFont(font)
+    for color, off in ((QColor(0, 0, 0, 150), drop), (QColor(255, 255, 255), 0)):
+        painter.setPen(color)
+        painter.drawText(drop + off, metrics.ascent() + off, words)
+    painter.end()
+    return drawn
+
+
+def _mark_picture(file: str) -> QImage | None:
+    """A picture file as a watermark, no larger than 2048 px a side. Read as untrusted: None
+    for what is no picture, or one too large to be a watermark."""
+    reader = QImageReader(file)
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if not size.isValid() or max(size.width(), size.height()) > MARK_SIDE:
+        return None
+    drawn = reader.read()
+    if drawn.isNull():
+        return None
+    drawn = drawn.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    if max(drawn.width(), drawn.height()) > 2048:
+        drawn = drawn.scaled(QSize(2048, 2048), Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+    return drawn
+
+
+def mark_base(mark: dict) -> QImage | None:
+    """The watermark itself, at a size of its own and at full strength; None where there is
+    none (switched off, no text, a file that is no picture). It is made once for a text or a
+    file: an export scales it to the file's picture and Edit to the photo on screen, so that
+    its scale, its opacity and its place cost nothing to change. (It was drawn anew at every
+    step of a slider, a picture read from its file each time; the owner: "LAGS like hell".)"""
+    if mark["kind"] == "text" and mark["text"].strip():
+        return _mark_text(mark["text"].strip())
+    if mark["kind"] == "picture" and mark["file"]:
+        return _mark_picture(mark["file"])
+    return None
+
+
+def mark_size(mark: dict, base: tuple[int, int], wide: int, high: int) -> tuple[int, int]:
+    """How large the watermark (`base`: its own width and height) is on a picture of that
+    size: as high as `size` percent of the shorter side, and no wider than the picture less
+    its edges (then lower, too)."""
+    tall = max(4.0, mark["size"] / 100 * min(wide, high))
+    across = base[0] * tall / max(1, base[1])
+    fit = min(1.0, max(8, wide - 2 * mark_edge(wide, high)) / max(1.0, across))
+    return max(1, round(across * fit)), max(1, round(tall * fit))
+
+
+def mark_edge(wide: int, high: int) -> int:
+    """How far a watermark stays from the photo's edges: 3 % of its shorter side."""
+    return round(0.03 * min(wide, high))
+
+
+def mark_at(place: int, wide: int, high: int, across: int, down: int) -> tuple[int, int]:
+    """Where the top left of a watermark `across` by `down` goes on a picture of that size."""
+    edge = mark_edge(wide, high)
+    return ((edge, (wide - across) // 2, wide - across - edge)[place % 3],
+            (edge, (high - down) // 2, high - down - edge)[place // 3])
+
+
+def stamp(image: QImage, mark: dict, base: QImage | None = None) -> None:
+    """Paint the watermark on a picture that is about to be written."""
+    base = base if base is not None else mark_base(mark)
+    if base is not None:
+        size = mark_size(mark, (base.width(), base.height()), image.width(), image.height())
+        drawn = base.scaled(QSize(*size), Qt.AspectRatioMode.IgnoreAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation)
+        painter = QPainter(image)
+        painter.setOpacity(mark["strength"] / 100)
+        painter.drawImage(*mark_at(mark["place"], image.width(), image.height(), *size), drawn)
+        painter.end()
+
+
 def write(image: QImage, path: Path, kind: str, quality: int = 90) -> None:
     """The image into the file that `destination` took. Failed if it cannot be written; the
     file is then removed again, so that nothing half-written or empty is left behind."""
@@ -180,6 +303,16 @@ class Exporter(QObject):
             self._recent = list(json.loads(session.remembered("export/recent", "[]")))[:RECENT]
         except (ValueError, TypeError):
             self._recent = []
+        try:  # the watermark, kept between runs too
+            self._mark = valid_mark(json.loads(session.remembered("export/mark", "{}")))
+        except (ValueError, TypeError):
+            self._mark = dict(MARK)
+        self._mark_shown = session.remembered("export/mark_shown", "yes") == "yes"
+        self._mark_serial, self._marked = 0, (None, None)
+        # The watermark is written to the settings when it has come to rest, not at every
+        # step of a slider: a write is 2.5 ms on the owner's disk, 6 at worst, and a frame
+        # of his display is 4 ("the faster i move the sliders ... the laggier it is").
+        self._mark_keeper = QTimer(self, singleShot=True, interval=400, timeout=self.keep_mark)
         self.decoded.connect(self._decoded)
         self.written.connect(self._written)
 
@@ -220,6 +353,71 @@ class Exporter(QObject):
         `folder`, `when` (seconds since 1970), `thumb` (a small picture of it: `small`), `wide`,
         `high`, `bytes`."""
         return self._recent
+
+    # ---- the watermark ----------------------------------------------------------------------
+
+    markChanged = Signal()
+
+    @Property("QVariantMap", notify=markChanged)
+    def mark(self) -> dict:
+        """The watermark every export gets (MARK)."""
+        return self._mark
+
+    @Property(int, notify=markChanged)
+    def markSerial(self) -> int:  # noqa: N802
+        """Another number whenever the watermark itself is another (its kind, its text, its
+        file; not its scale, opacity or place): part of its picture's address."""
+        return self._mark_serial
+
+    @Property(bool, notify=markChanged)
+    def markShown(self) -> bool:  # noqa: N802
+        """Whether Edit shows the watermark on the photo (an export has it either way)."""
+        return self._mark_shown
+
+    @Slot("QVariantMap")
+    def setMark(self, values: dict) -> None:  # noqa: N802
+        values = dict(values)
+        if "file" in values and "://" in str(values["file"]):
+            values["file"] = QUrl(str(values["file"])).toLocalFile()
+        now = valid_mark({**self._mark, **values})
+        # (Its picture is made anew for another kind, text or file; and when a file is chosen,
+        # also the one it had: the file itself may be another by now.)
+        if "file" in values or any(now[k] != self._mark[k] for k in ("kind", "text", "file")):
+            self._mark_serial += 1
+        elif now == self._mark:
+            return
+        self._mark = now
+        self._mark_keeper.start()
+        self.markChanged.emit()
+
+    def keep_mark(self) -> None:
+        """Write the watermark to the settings now (also at exit, should it not be yet)."""
+        self._mark_keeper.stop()
+        self.session.remember("export/mark", json.dumps(self._mark))
+
+    @Slot(bool)
+    def setMarkShown(self, shown: bool) -> None:  # noqa: N802
+        self._mark_shown = shown
+        self.session.remember("export/mark_shown", "yes" if shown else "no")
+        self.markChanged.emit()
+
+    def mark_picture(self) -> QImage | None:
+        """The watermark itself (mark_base), made once until it is another. Also asked for on
+        Qt's image loader thread."""
+        if self._marked[0] != self._mark_serial:
+            self._marked = (self._mark_serial, mark_base(self._mark))
+        return self._marked[1]
+
+    @Slot(int, int, result="QVariantList")
+    def markPlace(self, wide: int, high: int) -> list:  # noqa: N802
+        """Where the watermark lies on a picture of that size, as shares of it: left, top,
+        width, height. Empty: there is none."""
+        base = self.mark_picture()
+        if base is None or wide <= 0 or high <= 0:
+            return []
+        across, down = mark_size(self._mark, (base.width(), base.height()), wide, high)
+        x, y = mark_at(self._mark["place"], wide, high, across, down)
+        return [x / wide, y / high, across / wide, down / high]
 
     @Slot()
     def forget(self) -> None:
@@ -398,7 +596,8 @@ class Exporter(QObject):
         if not self._job:
             return  # (stopped meanwhile)
         job, grabs, self._busy = self._job, self._grabs, True
-        options = {**self.options, "table": self._table is not None}
+        options = {**self.options, "table": self._table is not None, "mark": dict(self._mark),
+                   "mark_base": self.mark_picture()}
         self._job, self._grabs, self.picture, self.painted, self._table = {}, [], None, None, None
         self.changed.emit()
         threading.Thread(target=self._write, daemon=True,
@@ -417,6 +616,7 @@ class Exporter(QObject):
                 os.replace(part, photo)
                 return self.written.emit("", "", run)
             image = picture(assembled(job, grabs), int(options["longest"]))
+            stamp(image, options["mark"], options["mark_base"])
             if run != self._run:
                 return None
             path = destination(Path(options["folder"]), photo.name, FORMATS[options["kind"]][0])

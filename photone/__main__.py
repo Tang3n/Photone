@@ -12,7 +12,23 @@ import sys
 from pathlib import Path
 
 
+def tell_where_stuck() -> None:
+    """Should the program ever hang: `kill -USR1 <its process>` then writes down what every
+    one of its threads was doing, to `photone-stuck.txt` in the temporary folder, without
+    ending it. (It hung twice for the owner with nothing to say where. Not on Windows, which
+    has no such signal.)"""
+    import faulthandler
+    import signal
+    import tempfile
+    from pathlib import Path
+
+    if hasattr(signal, "SIGUSR1"):
+        out = open(Path(tempfile.gettempdir()) / "photone-stuck.txt", "w", encoding="utf-8")  # noqa: SIM115 - kept open: written to from a signal
+        faulthandler.register(signal.SIGUSR1, file=out, all_threads=True)
+
+
 def arguments() -> argparse.Namespace:
+    tell_where_stuck()  # (first of all: from here on a hang can be asked about)
     parser = argparse.ArgumentParser(prog="photone", description="A raw photo editor.")
     parser.add_argument("photos", nargs="*", type=Path, help="photos to open")
     parser.add_argument("--hdr", action="store_true", help="start with the switch on HDR")

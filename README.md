@@ -25,12 +25,20 @@ expect rough edges.
   shadows.
 - **Masks:** radial, linear, or painted with a brush. Each mask has its own exposure, color
   and curve settings, and its own pins.
+- **Black and white:** film looks (panchromatic, colored filters, orthochromatic) and an EQ
+  that sets how light each color becomes.
+- **LUTs:** install `.cube` files, stack several on a photo, each with its own strength;
+  export a photo's whole look as one LUT.
+- **Detail and lens:** sharpening, noise reduction, film grain; distortion, chromatic
+  aberration and vignetting corrected from the camera's own figures in the raw file (Sony).
+- **Copy and paste a look** from one photo onto others.
 - **Crop, straighten, rotate.**
 - **Library:** add folders (nothing is copied or moved), browse by folder, month or camera,
   pick, reject, star and label.
 - **Checkpoints and undo:** save named states of an edit; undo history is kept per photo.
 - **Export** to JPEG, PNG or TIFF (8 or 16 bit): the open photo from the Export page, or
-  select several and right click to export them all.
+  select several and right click to export them all. With a text or picture watermark if
+  you want one.
 - **SDR and HDR** display, switchable, where the desktop supports HDR.
 
 Your originals are never touched. Edits live in Photone's own catalog

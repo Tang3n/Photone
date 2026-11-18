@@ -2436,6 +2436,7 @@ Rectangle {
         visible: root.place === "export"
         anchors { left: parent.left; right: parent.right; top: topBar.bottom; bottom: foot.top }
         picture: stage.picture; painted: stage.painted; lut: stage.lut; ready: stage.ready
+        onMarkFileAsked: markOpener.open()
         // How and where to is remembered between runs.
         Component.onCompleted: {
             kind = session.remembered("export/kind", "jpeg"); quality = Number(session.remembered("export/quality", "90"))
@@ -2499,6 +2500,13 @@ Rectangle {
         fileMode: FileDialog.SaveFile; defaultSuffix: "cube"
         nameFilters: ["LUTs (*.cube)"]
         onAccepted: { exporter.startTable(String(selectedFile)); root.forceActiveFocus() }
+        onRejected: root.forceActiveFocus()
+    }
+    FileDialog {
+        id: markOpener
+        title: "Choose the watermark's picture"
+        nameFilters: ["Pictures (*.png *.jpg *.jpeg *.tif *.tiff *.webp *.svg)", "All files (*)"]
+        onAccepted: { exporter.setMark({ file: String(selectedFile), kind: "picture" }); root.forceActiveFocus() }
         onRejected: root.forceActiveFocus()
     }
     FileDialog {

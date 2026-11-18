@@ -419,6 +419,10 @@ SHOTS = {
              "when": 1795000000 - 400 * n, "wide": 7008, "high": 4672, "bytes": 9_400_000 - 700_000 * n}
             for n, name in enumerate(["IMG03692.jpg", "IMG03690.jpg", "IMG03682-2.jpg", "IMG03682.jpg"])]),
         session.exporter.changed.emit())),
+    "export-mark": (BIG, photo, lambda root, session: (
+        call(root, "show", "export"), find(root, "box:export").setProperty("folder", "/home/you/Pictures/Photone"),
+        session.exporter.setMark({"kind": "text", "text": "© Morphox", "size": 6.0, "strength": 80.0}))),
+    "mark": (BIG, photo, lambda root, session: session.exporter.setMark({"kind": "text", "text": "© Morphox", "size": 6.0, "strength": 80.0})),
     "export-small": (SMALL, photo, lambda root, session: (
         call(root, "show", "export"), find(root, "box:export").setProperty("resized", True),
         find(root, "box:export").setProperty("kind", "tiff16"))),
@@ -4314,6 +4318,114 @@ def audit_fringes() -> list[str]:
     return faults
 
 
+def audit_mark() -> list[str]:
+    """A watermark, measured in the picture: text set on the Export page is on the photo
+    there and in Edit, in the place chosen and as large as Size says; the switch hides it in
+    Edit only; the exported file has it exactly as Edit shows it at 100 %, also when hidden
+    there; a picture for a watermark; and with None there is none."""
+    session = ui.Session([Path("first.arw")], load=chart)
+    view, root = opened(session, "")
+    faults = Faults()
+    exporter, out = session.exporter, Path(tempfile.mkdtemp(prefix="photone-mark-", dir=SHELF.name))
+
+    def photo_now() -> np.ndarray:
+        settle()
+        wait(lambda: False, 250)
+        view.grabWindow()
+        return shown_at_full_size(view, root).astype(int)
+
+    def written(name: str) -> np.ndarray:
+        session.exporter.side = 256
+        session.exporter.start([str(p) for p in session.photos], {"kind": "png8", "quality": 92, "longest": 0, "folder": str(out)})
+        carry_out(view, session)
+        wait(lambda: not session.exporter.running, 8000)
+        return export.bytes_of(QImage(str(out / name))).astype(int)
+
+    bare = photo_now()
+    call(root, "show", "export")
+    settle()
+    view.grabWindow()
+    faults.expect(not find(root, "mark-text").isVisible() and exporter.mark["kind"] == "none", "a watermark is set before one was asked for")
+    click(view, find(root, "mark-kind:text"))
+    view.grabWindow()
+    click(view, find(root, "mark-text"))
+    for letter in "PHOTONE":
+        QTest.keyClick(view, letter)
+    QTest.keyClick(view, Qt.Key.Key_Return)
+    click(view, find(root, "mark-place:0"))
+    exporter.setMark({"size": 10.0, "strength": 100.0})
+    settle()
+    view.grabWindow()
+    faults.expect(exporter.mark == {"kind": "text", "text": "PHOTONE", "file": "", "place": 0, "size": 10.0, "strength": 100.0}, f"set on the Export page: {exporter.mark}")
+    faults.extend(audit_layout(view))
+    call(root, "show", "edit")
+    marked = photo_now()
+    changed = np.abs(marked - bare).max(axis=2) > 12
+    ys, xs = np.nonzero(changed)
+    edge = export.mark_edge(480, 320)
+    # (Its letters, which stand a little inside the line they are written on: capitals of a
+    # line 32 px high are some 24 px, and begin some 10 px under the line's top.)
+    faults.expect(len(ys) > 200 and edge <= ys.min() <= edge + 16 and edge <= xs.min() <= edge + 8 and 18 <= ys.max() - ys.min() <= 34 and xs.max() < 300,
+                  f"in Edit the watermark covers rows {ys.min() if len(ys) else 0} to {ys.max() if len(ys) else 0} and columns {xs.min() if len(xs) else 0} to {xs.max() if len(xs) else 0} (top left, a line 32 px high, {edge} px from the edges)")
+    file = written("first.png")
+    gap = np.abs(file - marked)
+    # (Edit scales the watermark's picture on the GPU and the file's is scaled by Qt: along
+    # the letters' edges the two differ by some levels, nowhere by a letter.)
+    faults.expect(file.shape == marked.shape and (gap > 40).mean() < 0.002 and gap.mean() < 0.5 and np.abs(file - bare).max() > 100,
+                  f"the exported file's watermark is not Edit's: {(gap > 40).mean():.2%} of the picture differs much, {gap.mean():.2f} levels on average")
+    # Bottom right; hidden in Edit, the file has it all the same.
+    exporter.setMark({"place": 8})
+    low = photo_now()
+    ys, xs = np.nonzero(np.abs(low - bare).max(axis=2) > 12)
+    faults.expect(len(ys) > 200 and 319 - edge - 14 <= ys.max() <= 319 - edge and 479 - edge - 8 <= xs.max() <= 479 - edge and ys.min() > 200,
+                  f"Bottom right: it covers rows {ys.min() if len(ys) else 0} to {ys.max() if len(ys) else 0}, columns {xs.min() if len(xs) else 0} to {xs.max() if len(xs) else 0}")
+    exporter.setMarkShown(False)
+    hidden = photo_now()
+    faults.expect(np.abs(hidden - bare).max() <= 1, "hidden in Edit, the watermark is still on the photo there")
+    file = written("first-2.png")
+    faults.expect((np.abs(file - low) > 40).mean() < 0.002 and np.abs(file - bare).max() > 100, "hidden in Edit, the exported file has no watermark, or another")
+    # Its scale, opacity and place are no other picture: nothing is fetched or drawn anew
+    # for a step of a slider (it lagged when each step was).
+    serial, made = exporter.markSerial, exporter.mark_picture()
+    for step in range(20):
+        exporter.setMark({"size": 5.0 + step, "strength": 40.0 + step, "place": step % 9})
+    faults.expect(exporter.markSerial == serial and exporter.mark_picture() is made, "a change of scale, opacity or place makes the watermark's picture anew")
+    # And a slider being dragged reaches the watermark on the page without Python being told
+    # at all, which hears of it once, when the slider is let go.
+    call(root, "show", "export")
+    settle()
+    view.grabWindow()
+    told = [0]
+    exporter.markChanged.connect(lambda: told.__setitem__(0, told[0] + 1))
+    drawn = next(i for i in items(find(root, "box:export")) if i.objectName() == "watermark")
+    slider = find(root, "mark-size")
+    at, was, during = box(slider.findChild(QObject, "thumb")).center().toPoint(), exporter.mark["size"], []
+    moves(view, at, [QPoint(-20, 0), QPoint(-40, 0), QPoint(-60, 0)], lambda: during.append((told[0], round(drawn.width(), 1))))
+    faults.expect([d[0] for d in during] == [0, 0] and during[0][1] > during[1][1] > drawn.width(),
+                  f"dragging Scale: Python was told {[d[0] for d in during]} times on the way, the watermark was {[d[1] for d in during]} and then {drawn.width():.1f} px wide")
+    faults.expect(told[0] == 1 and exporter.mark["size"] < was, f"let go, Python was told {told[0]} times; Scale went from {was} to {exporter.mark['size']}")
+    call(root, "show", "edit")
+    exporter.setMark({"size": 10.0, "strength": 100.0, "place": 8})
+    exporter.setMarkShown(True)
+    # A picture: a red square, half as strong; one that is no picture is none.
+    square = QImage(40, 40, QImage.Format.Format_RGB32)
+    square.fill(QColor(255, 0, 0))
+    square.save(str(out / "logo.png"))
+    exporter.setMark({"kind": "picture", "file": str(out / "logo.png"), "place": 4, "size": 25.0, "strength": 50.0})
+    logo = photo_now()
+    middle, was = logo[160, 240], bare[160, 240]
+    ys, xs = np.nonzero(np.abs(logo - bare).max(axis=2) > 6)
+    faults.expect(abs(int(middle[0]) - (int(was[0]) + 255) // 2) <= 4 and abs(int(middle[1]) - int(was[1]) // 2) <= 4 and abs((ys.max() - ys.min() + 1) - 80) <= 2,
+                  f"a red square at half strength in the middle: {middle.tolist()} over {was.tolist()}, {ys.max() - ys.min() + 1 if len(ys) else 0} px high (80)")
+    (out / "logo.png").write_text("no picture any more", "utf-8")
+    exporter.setMark({"file": str(out / "logo.png")})  # (chosen again: read again)
+    faults.expect(np.abs(photo_now() - bare).max() <= 1 and exporter.markPlace(480, 320) == [], "a watermark's file that is no picture is still drawn")
+    exporter.setMark({"kind": "none"})
+    faults.expect(np.abs(written("first-3.png") - bare).max() <= 1, "with None the exported file is not the photo alone")
+    ui.close_view(view)
+    return faults
+
+
 def audit_tools() -> list[str]:
     """The cards of the Adjust tab, with real clicks and keys: Light alone open at the start
     (the owner's choice), a card's head folds and opens it, T and W open theirs and bring them in sight,
@@ -4728,9 +4840,10 @@ def shoot(name: str) -> list[str]:
             settle()
         if any(i.isVisible() and i.objectName().startswith("modal:") for i in items(root)):
             faults += audit_modal(view, root)  # a question is open: nothing else may respond
-        elif root.property("place") == "edit" and not name.startswith(("strip", "lens")):  # (in the library or
+        elif root.property("place") == "edit" and not name.startswith(("strip", "lens", "mark")):  # (in the library or
             # Export the photo is not on show; the filmstrip's shots show a photo that is no chart,
-            # and the lens shots a chart that is bent and lit by its lens's figures: "(lens)" measures that)
+            # and the lens shots a chart that is bent and lit by its lens's figures, the watermark's one
+            # with words on it: "(lens)" and "(mark)" measure those)
             faults += (audit_develop(view, root, session) + audit_view(view, root, session)
                        + audit_gestures(view, root, session))
     ON_SHELF[0] = None  # with its window, not when the next shot begins (see app.close_view)
@@ -4760,7 +4873,7 @@ def sheet(names: list[str], title: str) -> None:
 AUDITS = {"(keys)": audit_stepping, "(column)": audit_column, "(wheel)": audit_wheel,
           "(wheel data)": audit_wheel_data, "(dots)": audit_dots_place, "(pixels)": audit_pixels, "(colors data)": audit_colors_data, "(pins)": audit_pins,
           "(pin panel)": audit_pin_panel,
-          "(masks)": audit_masks, "(masks data)": audit_masks_data, "(moves)": audit_moves, "(scroll)": audit_scroll, "(resume)": audit_resume, "(strip)": audit_strip, "(local)": audit_local, "(fourth)": audit_fourth, "(mono)": audit_mono, "(detail)": audit_detail, "(lens)": audit_lens, "(fringes)": audit_fringes, "(grain)": audit_grain, "(look)": audit_look, "(presets)": audit_presets, "(lut)": audit_lut, "(table)": audit_table, "(menu)": audit_menu, "(color tools)": audit_color_tools,
+          "(masks)": audit_masks, "(masks data)": audit_masks_data, "(moves)": audit_moves, "(scroll)": audit_scroll, "(resume)": audit_resume, "(strip)": audit_strip, "(local)": audit_local, "(fourth)": audit_fourth, "(mono)": audit_mono, "(detail)": audit_detail, "(lens)": audit_lens, "(fringes)": audit_fringes, "(mark)": audit_mark, "(grain)": audit_grain, "(look)": audit_look, "(presets)": audit_presets, "(lut)": audit_lut, "(table)": audit_table, "(menu)": audit_menu, "(color tools)": audit_color_tools,
           "(test chart)": audit_test_chart, "(library)": audit_library, "(export)": audit_export,
           "(frame)": audit_frame, "(crop)": audit_crop, "(slider)": audit_slider, "(tools)": audit_tools,
           "(curve)": audit_curve, "(balance)": audit_balance, "(start)": audit_start, "(tone)": audit_tone, "(scopes)": audit_scopes,
