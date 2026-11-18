@@ -1945,6 +1945,18 @@ def audit_test_chart() -> list[str]:
     settle()
     faults.expect(not session.panels["chart"] and "1/1/" in session.source, "the next photo opens with the test chart still on")
     ui.close_view(view)
+    # The photo's lens corrections are not for the chart, which no lens drew: neither the
+    # camera's figures nor what was set by hand.
+    session = ui.Session([Path("test chart.arw")], load=lensed)
+    view, root = opened(session, "")
+    session.setEdits({"caRed": 50.0, "defringePurple": 80.0})
+    session.commitEdit()
+    faults.expect(session.uniforms["lensOn"] == 1 and session.uniforms["defringePurple"] > 0, "the lens corrections are not on for the photo itself")
+    session.setPanel("chart", True)
+    faults.expect(session.uniforms["lensOn"] == 0 and session.uniforms["defringePurple"] == 0, "the photo's lens corrections are applied to the test chart")
+    session.setPanel("chart", False)
+    faults.expect(session.uniforms["lensOn"] == 1, "back on the photo, its lens corrections are gone")
+    ui.close_view(view)
     return faults
 
 
@@ -2572,8 +2584,9 @@ class Faults(list):
 
 
 def audit_slider() -> list[str]:
-    """A slider under a real mouse: pressing it changes nothing, a drag moves the value by how
-    far the pointer went (Shift: a tenth of that), a double click puts it back to rest."""
+    """A slider under a real mouse: pressing its thumb changes nothing, a drag moves the value by
+    how far the pointer went (Shift: a tenth of that), a double click puts it back to rest, and
+    a press off the thumb brings the thumb there at once."""
     session = ui.Session([Path("first.arw")], load=chart)
     view, root = opened(session, "tone")
     slider = find(root, "slider:exposure")  # kept: its wrapper going would take the track's
@@ -2593,13 +2606,14 @@ def audit_slider() -> list[str]:
     double_click(view, at)
     if session.edit["exposure"] != 0:
         faults.append(f"a double click left Exposure at {session.edit['exposure']}")
-    # A drag that begins off the thumb first brings the thumb there: pressed 120 px left of the
-    # middle and dragged 30 px right, the value is that of 90 px left of the middle. The press
-    # alone changes nothing.
+    # A press off the thumb brings the thumb there at once, and the drag goes on from there:
+    # pressed 120 px left of the middle the value is that of 120 px left, and dragged 30 px
+    # right, that of 90 px left. All of it is one step of undo.
     drag(view, at + QPoint(-120, 0), QPoint(30, 0), down=lambda: faults.expect(
-        session.edit["exposure"] == 0, f"pressing the track off the thumb changed the value to {session.edit['exposure']}"))
+        abs(session.edit["exposure"] + 120 * per_px) < 0.011, f"a press 120 px left of the thumb gave {session.edit['exposure']:.2f}, not {-120 * per_px:.2f}"))
     faults.expect(abs(session.edit["exposure"] + 90 * per_px) < 0.011, f"a drag begun 120 px left of the thumb and taken 30 px right gave {session.edit['exposure']:.2f}, not {-90 * per_px:.2f}")
     session.undo()
+    faults.expect(session.edit["exposure"] == 0, "a press off the thumb and its drag are more than one step of undo")
     # A number typed and then left by a click elsewhere (on the empty ground of the photo's
     # view) is taken, as Enter would; Escape throws it away (docs/PLAN.md §5).
     def typed(value: str, leave) -> None:

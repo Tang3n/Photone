@@ -1079,7 +1079,11 @@ class Session(QObject):
     def _numbers(self, shown: dict) -> dict:
         """The shader's numbers for an edit of the photo on show."""
         wide, high = self._stored_size()
-        numbers = edit.uniforms(shown, self._camera, self._raw, self.peak if self.hdr else 1.0,
+        camera = self._camera
+        if self._panels["chart"]:  # no lens drew the test chart: nothing of a lens to undo
+            shown = {k: v for k, v in shown.items() if k not in edit.TOOLS["lens"]}
+            camera = camera and {**camera, "lens": None}
+        numbers = edit.uniforms(shown, camera, self._raw, self.peak if self.hdr else 1.0,
                                 wide / max(1, high), wide)
         return shaders.for_qml({**numbers, "frame": self._frame()["matrix"]})
 
