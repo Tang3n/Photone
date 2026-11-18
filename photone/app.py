@@ -56,7 +56,7 @@ from PySide6.QtGui import (
 from PySide6.QtQml import QJSValue, QQmlImageProviderBase
 from PySide6.QtQuick import QQuickImageProvider, QQuickItem, QQuickView
 
-from photone import HOMEPAGE, __version__, decode, edit, scopes, shaders
+from photone import HOMEPAGE, QUIET, __version__, decode, edit, scopes, shaders
 from photone.catalog import Catalog, identify
 from photone.export import Exporter
 from photone.library import Library, about
@@ -109,7 +109,10 @@ class Recent:
     def __init__(self, room: int | None = None) -> None:
         """`room`: unless told, a sixteenth of the machine's memory, 2 GB at most (six photos
         of 33 MP)."""
-        memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        try:
+            memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        except (AttributeError, ValueError, OSError):
+            memory = 16 << 30  # ponytail: Windows is not asked, 16 GB is assumed (so 1 GB here)
         self.room = min(2 << 30, memory // 16) if room is None else room
         self.kept, self.lock = OrderedDict(), threading.Lock()
 
@@ -1238,7 +1241,8 @@ class Session(QObject):
         def when(made: float) -> str:
             at = time.localtime(made)
             same_day = time.strftime("%Y-%m-%d", at) == today
-            return time.strftime("%H:%M" if same_day else "%-d %b %Y", at)
+            # (Not "%-d": Windows does not know it.)
+            return time.strftime("%H:%M" if same_day else f"{at.tm_mday} %b %Y", at)
 
         return [{"id": c["id"], "name": c["name"], "when": when(c["made"]), "made": c["made"],
                  "state": "here" if c["id"] == here
@@ -1435,7 +1439,7 @@ def ask_desktop_for_headroom(session: Session, screen: str) -> None:
     def ask() -> None:
         try:
             report = subprocess.run(["kscreen-doctor", "-o"], capture_output=True, text=True,
-                                    timeout=3).stdout
+                                    timeout=3, **QUIET).stdout
         except (OSError, subprocess.TimeoutExpired):
             return
         if found := headroom_from_kscreen(report, screen):
@@ -1605,7 +1609,7 @@ class Usage(QObject):
         try:
             pages = int(Path("/proc/self/statm").read_text().split()[1])
             parts.append(f"RAM {pages * os.sysconf('SC_PAGE_SIZE') / 2 ** 20:,.0f} MB")
-        except (OSError, ValueError, IndexError):
+        except (OSError, ValueError, IndexError, AttributeError):  # (the last: Windows in Wine)
             pass
         if self._tool:
             threading.Thread(target=self._ask, daemon=True).start()
@@ -1617,7 +1621,7 @@ class Usage(QObject):
             said = subprocess.run(
                 [self._tool, "--query-compute-apps=pid,used_memory",
                  "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=1.5, check=False).stdout
+                capture_output=True, text=True, timeout=1.5, check=False, **QUIET).stdout
         except (OSError, subprocess.SubprocessError):
             return
         mine = [line.split(",")[1].strip() for line in said.splitlines()
@@ -1894,10 +1898,13 @@ class FirstFrame(QObject):
 
     def __init__(self, view: QQuickView, session: Session) -> None:
         super().__init__(view)
-        self.view, self.session = view, session
+        self.view, self.session, self.done = view, session, False
 
     @Slot()
     def seen(self) -> None:
+        if self.done:  # (a second frame came before this ran: seen on Windows)
+            return
+        self.done = True
         self.view.frameSwapped.disconnect(self.seen)  # once is enough
         self.session.surface_known(is_hdr_surface(self.view))
 

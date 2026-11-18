@@ -15,6 +15,8 @@ import os
 import re
 import shutil
 import struct
+import subprocess
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -50,10 +52,17 @@ MONTHS = ("January", "February", "March", "April", "May", "June", "July", "Augus
           "September", "October", "November", "December")
 
 
+def within(path: str, folder: str) -> bool:
+    """Is that photo in that folder, or in one inside it? (By the system's own separator: with
+    "/" alone a folder on Windows showed no photos.)"""
+    return path.startswith(folder.rstrip("/\\") + os.sep)
+
+
 def thumbs() -> Path:
     """Where thumbnails are kept. ("-2": those of raw files made before 2026-11-17 did not take
     the camera's exposure compensation back; `Library` clears the folder they were in.)"""
-    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "photone" / "thumbs-2"
+    return Path(os.environ.get("XDG_CACHE_HOME") or os.environ.get("LOCALAPPDATA")
+                or Path.home() / ".cache") / "photone" / "thumbs-2"
 
 
 # ---- what a file says about itself ---------------------------------------------------------
@@ -572,7 +581,7 @@ class Library(QObject):
         kind, _, which = self._where.partition(":")
         month = time.strftime("%Y-%m", time.localtime(photo["taken"] or 0))
         placed = {"all": True, "edited": photo["edited"], "month": month == which,
-                  "folder": photo["path"].startswith(which.rstrip("/") + "/"),
+                  "folder": within(photo["path"], which),
                   "camera": (photo["camera"] or "Unknown") == which}[kind]
         f = self._filter
         return bool(placed and photo["stars"] >= f["stars"]
@@ -618,13 +627,13 @@ class Library(QObject):
 
         months = tally(lambda p: time.strftime("%Y-%m", time.localtime(p["taken"] or 0)))
         cameras = tally(lambda p: p["camera"] or "Unknown")
-        def within(folder: str) -> int:
-            return sum(1 for p in there if p["path"].startswith(folder.rstrip("/") + "/"))
+        def count(folder: str) -> int:
+            return sum(1 for p in there if within(p["path"], folder))
 
         folders = self.catalog.folders() if self.catalog else []
         return {
             "folders": [{"id": f"folder:{f}", "name": Path(f).name or f, "path": f,
-                         "there": Path(f).is_dir(), "count": within(f)} for f in folders],
+                         "there": Path(f).is_dir(), "count": count(f)} for f in folders],
             "months": [{"id": f"month:{m}", "count": n, "name": f"{MONTHS[int(m[5:]) - 1]} {m[:4]}"}
                        for m, n in sorted(months.items(), reverse=True)],
             # (Those without a camera's name last, whatever their number, as "Other".)
@@ -731,6 +740,9 @@ class Library(QObject):
         file manager over D-Bus (org.freedesktop.FileManager1, which Dolphin, Nautilus, Nemo
         and Thunar answer); where none answers, the folder is opened as it is."""
         where = Path(path)
+        if sys.platform == "win32" and where.is_file():
+            subprocess.Popen(f'explorer /select,"{where}"')  # (Explorer's own way of it)
+            return
         if where.is_file():
             call = QDBusMessage.createMethodCall(
                 "org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",

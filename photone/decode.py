@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import sys
+import threading
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from multiprocessing.shared_memory import SharedMemory
@@ -188,14 +190,21 @@ def load(path: Path, half: bool = True) -> tuple[dict, Pixels]:
 
 
 def load_shared(path: Path, half: bool) -> tuple[dict, str]:
-    """In the worker: the pixels go into shared memory, and only its name travels back.
-    (Through a pipe, 264 MB of them took a quarter of a second.)"""
+    """In the worker: the pixels go into shared memory, and only its name travels back (that
+    is all of a SharedMemory that is sent; the program has it open as soon as the answer
+    arrives). (Through a pipe, 264 MB of them took a quarter of a second.)"""
     info, pixels = develop(path, half)
     w, h = info["width"], info["height"]
     shared = SharedMemory(create=True, size=w * h * 8)
     store(pixels, shared.buf)
-    shared.close()
-    return info, shared.name
+    if sys.platform == "win32":
+        # Windows drops the memory when nobody has it open: held until the program surely has.
+        later = threading.Timer(30, shared.close)
+        later.daemon = True
+        later.start()
+    else:
+        shared.close()
+    return info, shared
 
 
 class Workers:
@@ -255,7 +264,7 @@ class Workers:
         memory its pixels are in given back when it is done."""
         def free(done) -> None:
             if not done.cancelled() and not done.exception():
-                Pixels(None, SharedMemory(name=done.result()[1])).close()
+                Pixels(None, done.result()[1]).close()
 
         if not future.cancel():
             future.add_done_callback(free)
@@ -267,14 +276,14 @@ class Workers:
         if early and early.cancel():
             early = None
         try:
-            info, name = early.result() if early else self.call(load_shared, path, half)
+            info, shared = early.result() if early else self.call(load_shared, path, half)
         except BrokenProcessPool:
             self.pool = self._start()
             raise Unreadable(f"{path.name}: the decoder crashed on this file") from None
         except Unreadable as e:
             raise Unreadable(str(e) if path.name in str(e) else f"{path.name}: {e}") from None
-        shared = SharedMemory(name=name)
-        return info, Pixels(shared.buf, shared)
+        size = info["width"] * info["height"] * 8  # (Windows hands out whole pages: cut to this)
+        return info, Pixels(shared.buf if len(shared.buf) == size else shared.buf[:size], shared)
 
     def close(self) -> None:
         self.ahead([])
@@ -291,14 +300,29 @@ def _begin(parent: int, calm: bool = False) -> None:
     import ctypes
     import signal
 
-    ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
+    if sys.platform == "win32":  # no such signal there: a thread waits for the program's end
+        kernel = ctypes.windll.kernel32
+        kernel.OpenProcess.restype = kernel.GetCurrentProcess.restype = ctypes.c_void_p
+        program = ctypes.c_void_p(kernel.OpenProcess(0x100000, False, parent))  # SYNCHRONIZE
+
+        def outlived() -> None:
+            kernel.WaitForSingleObject(program, -1)  # (at once, should it be gone already)
+            os._exit(0)
+
+        threading.Thread(target=outlived, daemon=True).start()
+    else:
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
     # Ctrl+C in the terminal reaches every process of the program; the program ends its
     # workers itself (`Workers.close`). Each of them printed a traceback of it.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     if os.getppid() != parent:  # it ended before we could ask
         os._exit(0)
     if calm:
-        os.nice(10)
+        if sys.platform == "win32":
+            me = ctypes.c_void_p(kernel.GetCurrentProcess())
+            kernel.SetPriorityClass(me, 0x4000)  # BELOW_NORMAL_PRIORITY_CLASS
+        else:
+            os.nice(10)
         # (Before the decoder is loaded: it reads this once.)
         os.environ["OMP_NUM_THREADS"] = str(max(2, (os.cpu_count() or 2) // 4))
 

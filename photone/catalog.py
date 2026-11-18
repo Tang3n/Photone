@@ -144,7 +144,8 @@ def identify(photo: Path) -> str | None:
 
 
 def default_path() -> Path:
-    data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+    data = Path(os.environ.get("XDG_DATA_HOME") or os.environ.get("LOCALAPPDATA")  # (Windows)
+                or Path.home() / ".local/share")
     return data / "photone" / "catalog.db"
 
 
@@ -346,7 +347,7 @@ class Catalog:
 
 def _under(folder: Path) -> str:
     """A LIKE pattern for every path under a folder (with ! as the escape character)."""
-    text = str(folder).rstrip("/")
+    text = str(folder).rstrip("/\\")
     for special in "!%_":
         text = text.replace(special, "!" + special)
-    return text + "/%"
+    return text + os.sep + "%"  # (os.sep: a backslash on Windows, where "/%" found nothing)

@@ -264,7 +264,7 @@ def check_workers() -> None:
             info, pixels = workers.load(path)
             assert info["name"] == "p.png" and bytes(pixels.buf) == bytes(own.buf) and (path, True) not in workers.before
             pixels.close()
-            left = waiting.result()[1]
+            left = waiting.result()[1].name
             workers.ahead([])
             assert workers.before == {}
             for _ in range(200):  # (given back from the thread that finished the decoding)

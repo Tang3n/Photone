@@ -59,6 +59,19 @@ cd Photone
 The first run downloads Python, Qt and the other packages. System packages are listed in
 [docs/deps.md](docs/deps.md).
 
+To have it in the desktop's menu and in "Open with", as the `photone` command:
+
+```sh
+./install.sh              # ./install.sh --uninstall takes it away again
+```
+
+### Windows
+
+`build-windows.bat` (on Windows) or `./build-windows.sh` (on Linux) makes a folder `bin/` that
+runs on Windows 10 or 11 as it is, with nothing to install: start `Photone.exe` in it. Building
+needs only Python 3.11 or later (uv is used where there is one, pip otherwise). This build is new
+and little tested; HDR is Linux only for now.
+
 ## Handy keys
 
 | Key | Does |

@@ -9,22 +9,25 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
+import PySide6
 from PySide6.QtGui import QMatrix4x4, QVector4D
+
+from photone import QUIET
 
 UI = Path(__file__).parent / "ui"
 
 
 def cache() -> Path:
-    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "photone" / "shaders"
+    return Path(os.environ.get("XDG_CACHE_HOME") or os.environ.get("LOCALAPPDATA")
+                or Path.home() / ".cache") / "photone" / "shaders"
 
 
 def whole(file: str) -> str:
     """ui/<file> with every `#include "x"` line replaced by ui/x: the compiler has no include."""
-    return re.sub(r'(?m)^#include "(.+)"$', lambda found: (UI / found[1]).read_text(),
-                  (UI / file).read_text())
+    return re.sub(r'(?m)^#include "(.+)"$', lambda found: (UI / found[1]).read_text("utf-8"),
+                  (UI / file).read_text("utf-8"))
 
 
 def compiled(file: str) -> Path:
@@ -35,15 +38,15 @@ def compiled(file: str) -> Path:
     out = source.with_name(source.name + ".qsb")
     if out.exists():
         return out
-    beside = str(Path(sys.executable).parent)  # where PySide6 put it, in the environment
-    tool = shutil.which("pyside6-qsb", path=beside) or shutil.which("pyside6-qsb")
+    # Inside PySide6 itself, wherever that is (an environment, or the Windows build's folder).
+    tool = shutil.which("qsb", path=str(Path(PySide6.__file__).parent))
     if not tool:
-        raise RuntimeError("pyside6-qsb, the shader compiler that comes with PySide6, is missing")
+        raise RuntimeError("qsb, the shader compiler that comes with PySide6, is missing")
     out.parent.mkdir(parents=True, exist_ok=True)
-    source.write_text(text)
+    source.write_text(text, "utf-8")
     # SPIR-V for Vulkan is always in; GLSL for OpenGL and OpenGL ES, HLSL and Metal for the rest.
     done = subprocess.run([tool, "--glsl", "300 es,330", "--hlsl", "50", "--msl", "12",
-                           "-o", str(out), str(source)], capture_output=True, text=True)
+                           "-o", str(out), str(source)], capture_output=True, text=True, **QUIET)
     if done.returncode:
         out.unlink(missing_ok=True)
         raise RuntimeError(f"{file} does not compile ({source}):\n{done.stderr or done.stdout}")

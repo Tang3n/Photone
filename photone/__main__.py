@@ -93,7 +93,7 @@ def main() -> None:
 
     # The desktop's own file dialog, on any desktop, through its portal. (Plasma names its
     # own Qt theme here, which the Qt that comes with PySide6 does not have.)
-    if os.environ.get("QT_QPA_PLATFORMTHEME", "kde") == "kde":
+    if sys.platform == "linux" and os.environ.get("QT_QPA_PLATFORMTHEME", "kde") == "kde":
         os.environ["QT_QPA_PLATFORMTHEME"] = "xdgdesktopportal"
 
     from PySide6.QtCore import QSettings
