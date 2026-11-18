@@ -30,10 +30,13 @@ Item {
         if (reach <= 0.5) return
         const pixels = across && wheel.pixelDelta.x !== 0 ? wheel.pixelDelta.x : wheel.pixelDelta.y
         const notches = wheel.angleDelta.y !== 0 ? wheel.angleDelta.y : wheel.angleDelta.x
+        // (Asked before the glide is stopped: a notch during one goes on from where that one
+        // was going, so a wheel turned fast goes as far as its notches say, and so faster.)
+        const from = gliding ? aim : at
         glide.stop()
         if (pixels !== 0 && notches % 120 !== 0) return go(at - pixels)   // a touchpad: as far as it says
         glide.from = at
-        glide.to = Math.max(0, Math.min(reach, (gliding ? aim : at) - notches / 120 * step))
+        glide.to = Math.max(0, Math.min(reach, from - notches / 120 * step))
         aim = glide.to
         glide.start()
     }
