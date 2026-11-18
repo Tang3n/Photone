@@ -22,6 +22,7 @@ library or relies on a new service adds a row here in the same change.
 | `kscreen-doctor` | `libkscreen-bin` (part of Plasma) | Reading the display's HDR headroom, for the brightest the photo may get | A headroom of 2× white is assumed |
 
 ## Development only (not shipped)
+| `update-desktop-database` | `desktop-file-utils` | `./install.sh`: telling the desktop about the new menu entry at once | The entry shows up when the desktop next reads its menu |
 
 | Dependency | Package | Used for |
 |---|---|---|
