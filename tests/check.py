@@ -599,8 +599,11 @@ def check_detail() -> None:
     assert none["sharpen"] == 0 and none["denoise"] == 0 and none["denoiseColor"] == 0 and edit.clean({"sharpen": 0, "denoise": 10}) == {"sharpen": 0.0}, "0 is off, and is kept"
     assert rest["detailX"] == 1 / 6000 and abs(rest["detailY"] - 1 / 4000) < 1e-12, "a pixel of the picture, as a share of it"
     u = edit.uniforms({"sharpen": 80.0, "sharpenRadius": 2.0, "sharpenMask": 50.0, "denoise": 100.0, "denoiseColor": 40.0}, None, True, shape=1.5, wide=6000)
-    assert u["sharpen"] == 0.8 and u["sharpenRadius"] == 2 and u["sharpenMask"] == 0.025 and abs(u["denoise"] - 0.07) < 1e-12 and u["denoiseColor"] == 0.1
+    assert u["sharpen"] == 0.8 and u["sharpenRadius"] == 2 and u["sharpenMask"] == 0.025 and abs(u["denoise"] - 0.07) < 1e-12 and abs(u["denoiseColor"] - (0.025 + 30 / 90 * 0.035)) < 1e-12 and abs(u["denoiseFar"] - 1 / 3) < 1e-12
     assert 0.02 < edit.uniforms({"denoise": 50.0}, None, True, wide=6000)["denoise"] < 0.03, "half way is a third of all of it"
+    low = edit.uniforms({"denoiseColor": 10.0}, None, True, wide=6000)
+    assert abs(low["denoiseColor"] - 0.025) < 1e-12 and low["denoiseFar"] == 0, "at 10, what a photo starts with, the color is taken from no further than it was"
+    assert edit.uniforms({"denoiseColor": 100.0}, None, True, wide=6000)["denoiseFar"] == 1
     blind = edit.uniforms({"sharpen": 80.0, "denoise": 100.0, "denoiseColor": 40.0}, None, True)
     assert blind["sharpen"] == 0 and blind["denoise"] == 0 and blind["denoiseColor"] == 0 and blind["detailX"] == 0, "without the picture's size: none of it"
     assert edit.clean({"sharpen": 500, "sharpenRadius": 0.1, "denoise": -3, "denoiseColor": "much"}) == {"sharpen": 150.0, "sharpenRadius": 0.5, "denoise": 0.0}

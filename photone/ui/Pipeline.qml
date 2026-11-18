@@ -113,6 +113,7 @@ ShaderEffect {
     property real sharpenMask: used.sharpenMask
     property real denoise: used.denoise
     property real denoiseColor: used.denoiseColor
+    property real denoiseFar: used.denoiseFar
     property real lensOn: used.lensOn
     property real lensShape: used.lensShape
     property matrix4x4 lensGreen: used.lensGreen

@@ -111,6 +111,9 @@ def shelf(name: str, marked: bool = True) -> "library.Library":
     return shown
 
 
+SPECKS = (np.arange(60, 270, 15), np.arange(30, 128, 7))  # (rows, columns) of `noisy`'s dark pixels
+
+
 def noisy(path: Path, half: bool):
     """A photo to try sharpening and noise reduction on, 480 x 320: a gray with a sensor's
     noise (left third), the same noise over an edge from dark to light (middle third), and a
@@ -120,6 +123,7 @@ def noisy(path: Path, half: bool):
     x = np.arange(480)[None, :, None]
     roots = np.where(x < 160, 0.45, np.where(x < 240, 0.3, np.where(x < 320, 0.6, np.where(x < 400, 0.3, 0.6))))
     roots = np.broadcast_to(roots, (320, 480, 3)) + np.where(x < 320, spread, 0)
+    roots[SPECKS] = 0.15  # and a few lone dark pixels in the gray, as a sensor has them
     rgb = (np.clip(roots, 0, None) ** 2).astype(np.float32)
     return {**decode.meta(path.name, 480, 320), "raw": False, "camera": None}, decode.Pixels(decode.pack(rgb))
 
@@ -1016,12 +1020,12 @@ def audit_column() -> list[str]:
     faults.expect(folders.bottom() - 16 <= foot.top() + 1, f"the cards over Checkpoints reach into it: Folders ends at {folders.bottom()}, Checkpoints begins at {foot.top()}")
     faults.expect(upper.property("contentHeight") > upper.height(), "(the window is not low enough to try scrolling)")
 
-    def wheel(over, notches: int) -> None:
+    def wheel(over, notches: int, glide=400) -> None:
         at = box(over).center()
         QCoreApplication.sendEvent(view, QWheelEvent(
             at, at, QPoint(0, 0), QPoint(0, -120 * notches), Qt.MouseButton.NoButton,
             Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False))
-        wait(lambda: False, 400)  # the scroll glides to its place
+        wait(lambda: False, glide)  # the scroll glides to its place
 
     area, was = box(find(root, "curve-plot")), upper.property("contentY")
     drag(view, area.center().toPoint(), QPoint(0, -40))
@@ -1030,6 +1034,19 @@ def audit_column() -> list[str]:
     upper.setProperty("contentY", 0)
     wheel(upper, 3)
     faults.expect(upper.property("contentY") > 20, "the wheel does not scroll the column")
+    # Notches that come during the glide add up: a wheel turned fast goes as far as it says.
+    # (Each went on from where the column was, not from where it was going: the owner,
+    # "never getting faster if i really scroll faster".)
+    upper.setProperty("contentY", 0)
+    wheel(upper, 1)
+    one = upper.property("contentY")
+    upper.setProperty("contentY", 0)
+    wheel(upper, 1, 20)
+    wheel(upper, 1, 20)
+    wheel(upper, 1)
+    reach = upper.property("contentHeight") - upper.height()
+    faults.expect(reach > 3 * one and abs(upper.property("contentY") - 3 * one) < 2,
+                  f"three fast notches scrolled the column {upper.property('contentY'):.0f} px, one goes {one:.0f} (of {reach:.0f})")
     rows.setProperty("contentY", rows.property("originY"))
     wheel(rows, 3)
     faults.expect(rows.property("contentY") - rows.property("originY") > 20, "the wheel does not scroll the checkpoints")
@@ -4143,8 +4160,19 @@ def audit_detail() -> list[str]:
     calm = part(20, 140)
     faults.expect(calm.mean(axis=2).std() < 0.5 * light and abs(calm.mean() - gray.mean()) < 1 and rise() <= edge + 1,
                   f"noise reduction at 100: the gray's noise went from {light:.2f} to {calm.mean(axis=2).std():.2f} levels, the edge from {edge:.0f} to {rise():.0f} px")
+    # A lone dark pixel has no neighbor like it: it is taken for its neighbors all the same.
+    # (The owner, of Luminance at 100: "these tiny few pixel spots didnt get reduced".)
+    def specks(of: np.ndarray) -> float:  # how much darker than the gray the dark pixels are, in levels
+        return float(of.mean() - of.mean(axis=2)[SPECKS[0] - 40, SPECKS[1] - 20].mean())
+
+    faults.expect(specks(gray) > 60 and specks(calm) < 3, f"noise reduction at 100 leaves the lone dark pixels: {specks(gray):.0f} levels darker than the gray, then {specks(calm):.1f}")
+    set_(denoiseColor=10.0)
+    some = part(20, 140)
     set_(denoiseColor=100.0)
     plain_ = part(20, 140)
+    # (Past 10 it is taken from further out: before, 100 did what 10 does.)
+    faults.expect((plain_[..., 0] - plain_[..., 1]).std() < 0.8 * (some[..., 0] - some[..., 1]).std(),
+                  f"color noise reduction at 100 does no more than at 10: {(plain_[..., 0] - plain_[..., 1]).std():.2f} levels of color left, {(some[..., 0] - some[..., 1]).std():.2f} at 10")
     faults.expect((plain_[..., 0] - plain_[..., 1]).std() < 0.4 * tint and plain_.mean(axis=2).std() > 0.8 * light and rise() <= edge + 1,
                   f"color noise reduction at 100: the noise's color went from {tint:.2f} to {(plain_[..., 0] - plain_[..., 1]).std():.2f} levels, its lightness from {light:.2f} to {plain_.mean(axis=2).std():.2f}")
     # Sharpening, on the clean edge: steeper, and lighter than the light side just beyond it.

@@ -107,6 +107,7 @@ layout(std140, binding = 0) uniform buf {
     float sharpenMask;   // and the difference below which nothing is;
     float denoise;    // how far apart two pixels' lightness may be and count as one surface,
     float denoiseColor;  // and how far for their color.
+    float denoiseFar;    // How much the color is also taken from further out, 0..1.
     float lensOn;     // Lens corrections (photone/lens.py, tables): 1 if any is anything.
     float lensShape;  // The stored picture's width over its height.
     mat4 lensGreen;   // Sixteen numbers each, from the picture's middle (the first) to its corner:
@@ -381,7 +382,16 @@ float lensAt(mat4 table, float r) {
 // three differs from it by). Noise reduction is the weighted mean of the neighbors', each
 // counting the more the nearer its lightness is to this pixel's (an edge is not blurred
 // across): of the lightness over the eight around and eight a little further, of the color
-// over those and sixteen further out, since a sensor's color noise comes in larger blotches.
+// over those and sixteen further out, since a sensor's color noise comes in larger blotches,
+// and past 10 on its slider (`denoiseFar`) over thirty-two more, further out still: with
+// the sixteen alone the slider had done all it could by 10 (the owner: "doesnt seem to do
+// much after like value 10"; on 16 of his files at ISO 3200 and over a quarter of the fine
+// color noise and 0.62 of the 8 px blotches were left at 10 and at 100 alike, now 0.14 and
+// 0.30 at 100).
+// A speck, a pixel far from all sixteen around it (by three times what they differ by among
+// themselves), has no neighbor like it, so that mean left it as it was (the owner: "tiny few
+// pixel spots didnt get reduced"): it is weighed as if it had its neighbors' lightness, and
+// counts for nothing itself. The more so the higher Luminance is, wholly from 50.
 // Sharpening adds what the pixel's lightness differs by from the mean of the eight around it
 // (at `sharpenRadius`), unless that is less than `sharpenMask` (noise, not an edge).
 // `much`: how much of all this is done (none where the photo is seen from far: there is
@@ -390,32 +400,52 @@ vec3 detailed(sampler2D tex, vec2 at, vec3 centre, float much) {
     vec2 px = vec2(detailX, detailY);
     vec3 s0 = sqrt(max(centre, 0.0));
     float y0 = dot(s0, THIRD), near = max(sharpen > 0.0 ? sharpenRadius : 1.0, 0.5);
-    float nearSum = 0.0, lightSum = y0, lightWeight = 1.0, colorWeight = 1.0;
-    vec3 colorSum = s0 - y0;
-    float keepLight = 1.0 / max(denoise * denoise, 1e-8), keepColor = 1.0 / max(denoiseColor * denoiseColor, 1e-8);
+    bool calming = denoise > 0.0 || denoiseColor > 0.0;
+    vec3 around[16];
+    float nearSum = 0.0, sum = 0.0, squares = 0.0;
     for (int i = 0; i < 16; i++) {
         // The eight around (at `near` pixels), then eight at knight's moves from it.
         vec2 step = i < 8 ? near * vec2(float((i < 3 ? i : i < 5 ? (i - 3) * 2 : i - 5) - 1), float(i < 3 ? -1 : i < 5 ? 0 : 1))
                           : vec2(float((i - 8) / 4 == 0 ? 2 : 1) * ((i & 1) == 0 ? 1.0 : -1.0), float((i - 8) / 4 == 0 ? 1 : 2) * ((i & 2) == 0 ? 1.0 : -1.0));
-        if (i >= 8 && denoise <= 0.0 && denoiseColor <= 0.0) break;
-        vec3 s = sqrt(max(texture(tex, at + step * px).rgb, 0.0));
-        float y = dot(s, THIRD), apart = (y - y0) * (y - y0);
+        if (i >= 8 && !calming) break;
+        around[i] = sqrt(max(texture(tex, at + step * px).rgb, 0.0));
+        float y = dot(around[i], THIRD);
         if (i < 8) nearSum += y;
-        if (denoise > 0.0) { float w = exp(-apart * keepLight); lightSum += w * y; lightWeight += w; }
-        if (denoiseColor > 0.0) { float w = exp(-apart * keepColor); colorSum += w * (s - y); colorWeight += w; }
+        sum += y; squares += y * y;
+    }
+    float mean = sum / 16.0, spread = sqrt(max(squares / 16.0 - mean * mean, 1e-10));
+    // (0.0247: what `denoise` is at 50 on its slider.)
+    float lone = calming ? smoothstep(2.75, 3.75, abs(y0 - mean) / spread) * min(denoise / 0.0247, 1.0) : 0.0;
+    float like = mix(y0, mean, lone), own = 1.0 - lone + 1e-6;   // (never nothing to divide by)
+    float lightSum = own * y0, lightWeight = own, colorWeight = own;
+    vec3 colorSum = own * (s0 - y0);
+    float keepLight = 1.0 / max(denoise * denoise, 1e-8), keepColor = 1.0 / max(denoiseColor * denoiseColor, 1e-8);
+    if (calming) {
+        for (int i = 0; i < 16; i++) {
+            float y = dot(around[i], THIRD), apart = (y - like) * (y - like);
+            if (denoise > 0.0) { float w = exp(-apart * keepLight); lightSum += w * y; lightWeight += w; }
+            if (denoiseColor > 0.0) { float w = exp(-apart * keepColor); colorSum += w * (around[i] - y); colorWeight += w; }
+        }
     }
     if (denoiseColor > 0.0) {
-        for (int i = 0; i < 16; i++) {  // two rings, four and seven pixels out, the second turned against the first
-            float turn = (float(i & 7) + (i < 8 ? 0.0 : 0.5)) * 0.7853982;
-            vec3 s = sqrt(max(texture(tex, at + (i < 8 ? 4.0 : 7.0) * vec2(cos(turn), sin(turn)) * px).rgb, 0.0));
-            float y = dot(s, THIRD), w = exp(-(y - y0) * (y - y0) * keepColor);
+        // Rings of eight, each turned against the one before: 4 and 7 pixels out, and past 10
+        // on the slider 10 and 13 (wholly from 55), 17 to 21 and 22 to 30 (more as it rises).
+        int rings = denoiseFar > 0.0 ? 6 : 2;
+        for (int i = 0; i < rings * 8; i++) {
+            int ring = i / 8;
+            float out_ = ring == 0 ? 4.0 : ring == 1 ? 7.0 : ring == 2 ? 10.0 : ring == 3 ? 13.0 : ring == 4 ? 17.0 + 4.0 * denoiseFar : 22.0 + 8.0 * denoiseFar;
+            float counts = ring < 2 ? 1.0 : ring < 4 ? min(2.0 * denoiseFar, 1.0) : denoiseFar;
+            float turn = (float(i & 7) + ((ring & 1) == 0 ? 0.0 : 0.5)) * 0.7853982;
+            vec3 s = sqrt(max(texture(tex, at + out_ * vec2(cos(turn), sin(turn)) * px).rgb, 0.0));
+            float y = dot(s, THIRD), w = counts * exp(-(y - like) * (y - like) * keepColor);
             colorSum += w * (s - y); colorWeight += w;
         }
     }
     float light = denoise > 0.0 ? lightSum / lightWeight : y0;
     vec3 color = denoiseColor > 0.0 ? colorSum / colorWeight : s0 - y0;
     if (sharpen > 0.0) {
-        float edge = y0 - nearSum / 8.0, floor_ = sharpenMask + denoise * 0.5;
+        // (From `like`: a speck is not an edge to make steeper.)
+        float edge = like - nearSum / 8.0, floor_ = sharpenMask + denoise * 0.5;
         light += sharpen * edge * smoothstep(floor_, 2.0 * floor_ + 1e-5, abs(edge));
     }
     vec3 s = mix(s0, max(light + color, 0.0), much);

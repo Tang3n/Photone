@@ -99,6 +99,7 @@ layout(std140, binding = 0) uniform buf {  // must match pipeline.frag exactly
     float sharpenMask;   // and the difference below which nothing is;
     float denoise;    // how far apart two pixels' lightness may be and count as one surface,
     float denoiseColor;  // and how far for their color.
+    float denoiseFar;    // How much the color is also taken from further out, 0..1.
     float lensOn;     // Lens corrections (photone/lens.py, tables): 1 if any is anything.
     float lensShape;  // The stored picture's width over its height.
     mat4 lensGreen;   // Sixteen numbers each, from the picture's middle (the first) to its corner:

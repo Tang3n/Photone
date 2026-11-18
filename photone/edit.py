@@ -1225,14 +1225,19 @@ def detail_uniforms(full: dict, shape: float, wide: int) -> dict:
     `sharpenMask`: differences smaller than this are not sharpened (0.05 at 100). `denoise`,
     `denoiseColor`: how far apart two pixels may be and still count as the same surface,
     for their lightness (0.07 at 100, a third of that at 50: the low end is where a photo
-    taken in good light is set, and there a little is much) and for their color (0.25 at
-    100). Nothing of it without the picture's size."""
+    taken in good light is set, and there a little is much) and for their color (0.025 at
+    10, where a sensor's noise is already all within it, and slowly on to 0.06 at 100: what
+    rises past 10 is `denoiseFar`, how much the color is also taken from further out, to
+    all of it at 100; a wide reach across anything of another lightness would spread colors).
+    Nothing of it without the picture's size."""
+    color, far = full["denoiseColor"], max(full["denoiseColor"] - 10, 0) / 90
     known = wide > 0 and shape > 0
     return {"detailX": 1 / wide if known else 0.0, "detailY": shape / wide if known else 0.0,
             "sharpen": full["sharpen"] / 100 if known else 0.0,
             "sharpenRadius": full["sharpenRadius"], "sharpenMask": full["sharpenMask"] / 100 * 0.05,
             "denoise": (full["denoise"] / 100) ** 1.5 * 0.07 if known else 0.0,
-            "denoiseColor": full["denoiseColor"] / 100 * 0.25 if known else 0.0}
+            "denoiseColor": min(color, 10) * 0.0025 + far * 0.035 if known else 0.0,
+            "denoiseFar": far if known else 0.0}
 
 
 def uniforms(edit: dict, camera: dict | None, raw: bool, white: float = 1.0,  # noqa: PLR0913
