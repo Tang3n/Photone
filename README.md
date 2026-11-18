@@ -106,3 +106,12 @@ Building needs only Python 3.11 or later.
 ./run.sh shots    # render every screen off-screen and audit the layout
 ./run.sh lint     # ruff
 ```
+
+## License
+
+Photone is under the [MIT License](LICENSE).
+
+What it uses keeps its own license: Qt and PySide6 (LGPL-3.0), LibRaw (LGPL-2.1 or CDDL-1.0)
+through rawpy (MIT), NumPy (BSD-3-Clause), and the Noto Sans typeface that ships with it
+([SIL Open Font License](photone/ui/fonts/OFL.txt)). The Windows build carries these as separate
+files, with their license texts beside them.

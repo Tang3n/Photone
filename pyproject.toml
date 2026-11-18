@@ -2,6 +2,8 @@
 name = "photone"
 version = "0.1.0"
 description = "A raw photo editor built around a color wheel"
+license = "MIT"
+license-files = ["LICENSE", "photone/ui/fonts/OFL.txt"]
 requires-python = ">=3.12"
 dependencies = [
     "PySide6>=6.8",   # Qt Quick: the window, the interface, and the GPU surface (SDR or HDR)
