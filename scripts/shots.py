@@ -863,14 +863,14 @@ def audit_gestures(view, root, session) -> list[str]:
     if abs((photo.x() - before) - 70) > 1.5:
         faults.append(f"a left-button drag of 70 px moved the zoomed photo {photo.x() - before:.0f} px")
     drag(Qt.MouseButton.LeftButton, QPointF(-70, -50))
-    # The middle button fits the photo as it goes down; dragged on, it moves it from there.
+    # The middle button fits the photo as it goes down; dragged on, it does not move it.
     call(pane, "fit")
     settle()
     fitted_at = photo.x()
     call(pane, "zoomTo", 6.0, at.x() - origin.x(), at.y() - origin.y())
     settle()
     drag(Qt.MouseButton.MiddleButton)
-    if pane.property("fitted") or abs(photo.x() - fitted_at - 70) > 2:
+    if not pane.property("fitted") or abs(photo.x() - fitted_at) > 2:
         faults.append(f"a middle-button drag of 70 px from a zoomed photo: fitted {pane.property('fitted')}, "
                       f"{photo.x() - fitted_at:.0f} px from where Fit has it")
     call(pane, "fit")

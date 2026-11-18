@@ -357,7 +357,7 @@ Item {
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton | Qt.MiddleButton
         hoverEnabled: true
-        cursorShape: view.picking !== "" ? Qt.CrossCursor : pressed ? Qt.ClosedHandCursor : Qt.ArrowCursor
+        cursorShape: view.picking !== "" ? Qt.CrossCursor : (pressedButtons & Qt.LeftButton) ? Qt.ClosedHandCursor : Qt.ArrowCursor
         function place(mouse) { return Qt.point((mouse.x - photo.x) / photo.width, (mouse.y - photo.y) / photo.height) }
         onExited: view.hover = Qt.point(-1, -1)
         property point last
@@ -368,18 +368,16 @@ Item {
             sampling = view.picking === "neutral" && mouse.button === Qt.LeftButton
             if (sampling) view.sampled(place(mouse).x, place(mouse).y, true)
             // The middle button fits the photo, as it goes down (the owner: "on mouseDown,
-            // not mouseUp"). Held and dragged on, it moves the photo from there.
-            // (At once, not gliding: a drag that follows moves it from Fit itself.)
-            if (mouse.button === Qt.MiddleButton) view.fit()
+            // not mouseUp"). That is all it does: dragged, it does not move the photo.
+            if (mouse.button === Qt.MiddleButton) view.glideFit()
         }
-        // Dragging moves the photo, with any button. (A plain click is kept free: it picks a
+        // Dragging moves the photo, with the left button only. (A plain click is kept free: it picks a
         // neutral gray while that is asked for, and will pick a color once the wheel exists.)
         onPositionChanged: (mouse) => {
             if (pressed) {
                 travelled += Math.abs(mouse.x - last.x) + Math.abs(mouse.y - last.y)
                 if (sampling) view.sampled(place(mouse).x, place(mouse).y, false)
-                // (A middle click's own small slip does not move the photo off Fit.)
-                else if (!(mouse.buttons & Qt.MiddleButton) || travelled > 6) view.panBy(mouse.x - last.x, mouse.y - last.y)
+                else if (mouse.buttons & Qt.LeftButton) view.panBy(mouse.x - last.x, mouse.y - last.y)
                 last = Qt.point(mouse.x, mouse.y)
             }
             const at = place(mouse), on = view.ready && at.x >= 0 && at.x <= 1 && at.y >= 0 && at.y <= 1
