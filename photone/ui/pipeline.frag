@@ -37,6 +37,7 @@ layout(std140, binding = 0) uniform buf {
     float pinCount;   // how many color pins there are (edit.pins_uniforms)
     float reach;      // 1 + the pin whose reach is shown instead of the picture (H held); 0: none
     float look;       // 1: something is done to colors after the tone curve (edit.look_uniforms)
+    float mono;       // 1: black and white in the color tools' place, the B&W EQ in eqA0 and eqA1 (edit.mono_at)
     float saturation; // chroma times this (not where a pin protects)
     float vibrance;   // chroma of the muted colors times 1 + this, of the vivid ones left alone
     float chromaOn;   // 1: the chroma curve is not the straight line
@@ -84,6 +85,34 @@ layout(std140, binding = 0) uniform buf {
     mat4 chroma2M;
     mat4 eq2A0;
     mat4 eq2A1;
+    float grain;      // Film grain (edit.grain_uniforms): how far a grain is from the picture's lightness,
+    float grainWide;  // how many grains lie across the stored picture,
+    float grainHigh;  // and down it,
+    float grainRough; // how much of it is clumps three grains wide,
+    float grainColor; // and how colored it is.
+    mat4 grainX;      // How strong it is from black to white: a curve, as the tone curve is one.
+    mat4 grainY;
+    mat4 grainM;
+    float lutCount;   // The photo's LUTs (edit.luts_uniforms): how many, and one column each:
+    mat4 lutsA;       // points a side, how much of it is laid on, the row its slices begin at.
+    mat4 lutsB;       // (Four to a matrix: sixteen in all.)
+    mat4 lutsC;
+    mat4 lutsD;
+    float detailX;    // Sharpening and noise reduction (edit.detail_uniforms): one pixel of the stored
+    float detailY;    // picture as a share of it, across and down;
+    float sharpen;    // how much of a pixel's difference from its neighbors is added,
+    float sharpenRadius; // how far those neighbors are, in pixels,
+    float sharpenMask;   // and the difference below which nothing is;
+    float denoise;    // how far apart two pixels' lightness may be and count as one surface,
+    float denoiseColor;  // and how far for their color.
+    float lensOn;     // Lens corrections (photone/lens.py, tables): 1 if any is anything.
+    float lensShape;  // The stored picture's width over its height.
+    mat4 lensGreen;   // Sixteen numbers each, from the picture's middle (the first) to its corner:
+    mat4 lensRed;     // how many times further out the stored picture is read, for green, red
+    mat4 lensBlue;    // and blue (distortion, chromatic aberration),
+    mat4 lensLight;   // and how many times lighter a pixel is made (vignetting).
+    float defringePurple; // Fringes at edges taken out by their color (`defringed`): how much of the
+    float defringeGreen;  // purple ones, and of the green ones.
 };
 layout(binding = 1) uniform sampler2D source;  // the first picture, with mipmaps
 // The full-size picture. Bound from the moment it arrives, used or not, so that the GPU
@@ -92,6 +121,10 @@ layout(binding = 1) uniform sampler2D source;  // the first picture, with mipmap
 layout(binding = 2) uniform sampler2D sharp;
 // The photo's painted masks, one in each of red, green and blue (edit.painted).
 layout(binding = 3) uniform sampler2D painted;
+// The photo's LUTs as one picture: each one's slices of one blue side by side, red across and
+// green down, in a band of its own, one under the other (photone/lut.py, stacked). Any
+// picture where there are none: it is then not read.
+layout(binding = 4) uniform sampler2D lut;
 
 #include "oklab.glsl"
 
@@ -142,9 +175,55 @@ float eqGain(mat4 A0, mat4 A1, float count, float hue) {
         if (float(i) >= count) break;
         vec4 point = i < 4 ? A0[i] : A1[i - 4];
         float apart = abs(mod(hue - point.x + 180.0, 360.0) - 180.0);
-        gain += (1.0 - smoothstep(point.z * 0.5, point.z, apart)) * point.y;
+        gain += (0.5 + 0.5 * cos(3.14159265 * min(apart / point.z, 1.0))) * point.y;  // a bell (edit._bell)
     }
     return max(gain, 0.0);
+}
+
+// A LUT (`of`: its points a side, how much of it, the row its band begins at), laid on the
+// developed picture before the tone curve and the color tools. It is a table from one
+// screen color to another (sRGB, encoded), so the picture goes there and back; what is
+// brighter than the screen's white (HDR) is carried past it unchanged.
+vec3 lutAt(vec3 v, vec4 of) {
+    vec2 whole = vec2(textureSize(lut, 0));
+    float last = of.x - 1.0, blue = v.b * last, under = floor(blue);
+    vec2 within = vec2(0.5 + v.r * last, of.z + 0.5 + v.g * last);
+    return mix(texture(lut, (within + vec2(under * of.x, 0.0)) / whole).rgb,
+               texture(lut, (within + vec2(min(under + 1.0, last) * of.x, 0.0)) / whole).rgb, blue - under);
+}
+vec3 decoded(vec3 v) {
+    return mix(v / 12.92, pow((v + 0.055) / 1.055, vec3(2.4)), step(0.04045, v));
+}
+vec3 graded(vec3 c, vec4 of) {
+    vec3 shown = TO_SRGB * c, kept = clamp(shown, 0.0, 1.0);
+    return inverse(TO_SRGB) * (decoded(clamp(lutAt(encode(kept), of), 0.0, 1.0)) + shown - kept);
+}
+
+// Film grain: a number for every place of a lattice of grains, the same whenever that place
+// is drawn (the pattern is the picture's, not the screen's), from -0.5 to 0.5.
+float grainSeed(vec2 cell) {
+    vec3 p = fract(vec3(cell.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+float grainLattice(vec2 at) {
+    vec2 cell = floor(at), part = fract(at);
+    part = part * part * (3.0 - 2.0 * part);
+    return mix(mix(grainSeed(cell), grainSeed(cell + vec2(1.0, 0.0)), part.x),
+               mix(grainSeed(cell + vec2(0.0, 1.0)), grainSeed(cell + vec2(1.0, 1.0)), part.x), part.y) - 0.5;
+}
+// (Two lattices turned against each other, 30 and 71 degrees: one alone shows its rows and
+// columns as little squares, which no film has.)
+float grainField(vec2 at) {
+    return (grainLattice(mat2(0.866, 0.5, -0.5, 0.866) * at) + grainLattice(mat2(0.326, 0.945, -0.945, 0.326) * at + 19.7)) * 0.7071;
+}
+// The grain at a place counted in grains: the fine grain, and with roughness clumps two
+// grains wide on top. Where a pixel of the screen covers several grains it shows their
+// average, which is as much weaker as it covers grains across.
+float grainAt(vec2 at, float shift) {
+    float fine = grainField(at + shift) + grainRough * 0.8 * grainField(at / 2.1 + shift + 57.0);
+    vec2 covered = fwidth(at);
+    return fine / max(1.0, max(covered.x, covered.y));
 }
 
 // Develop: from what the sensor measured to a picture. All of it on scene-linear light.
@@ -262,6 +341,85 @@ vec2 squarely(sampler2D picture, vec2 place) {
     return (first + 0.5 + across) / size;
 }
 
+const vec3 THIRD = vec3(1.0 / 3.0);
+
+// Fringes: the purple (or green) seam a lens draws along an edge between dark and light.
+// Where the pixels three away differ much in lightness (an edge), what the pixel has of
+// purple (red and blue both above green) or of green (green above both) is taken out, as
+// much as asked; a purple or green thing that is no edge keeps its color. In the square
+// root of the light, as `detailed`.
+vec3 defringed(sampler2D tex, vec2 at, vec3 centre, float much) {
+    vec2 px = vec2(detailX, detailY);
+    vec3 s = sqrt(max(centre, 0.0));
+    float y0 = dot(s, THIRD), low = y0, high = y0;
+    for (int i = 0; i < 8; i++) {
+        float turn = float(i) * 0.7853982;
+        float y = dot(sqrt(max(texture(tex, at + 3.0 * vec2(cos(turn), sin(turn)) * px).rgb, 0.0)), THIRD);
+        low = min(low, y); high = max(high, y);
+    }
+    float edge = smoothstep(0.08, 0.25, high - low) * much;
+    float purple = max(min(s.r, s.b) - s.g, 0.0), green = max(s.g - max(s.r, s.b), 0.0);
+    s.rb -= defringePurple * edge * purple;
+    s.g -= defringeGreen * edge * green;
+    return s * s;
+}
+
+// A lens correction's number for a place that far from the picture's middle (1: its corner):
+// sixteen of them, the first at the middle, a straight line between two.
+float lensAt(mat4 table, float r) {
+    float x = clamp(r, 0.0, 1.0) * 15.0, low = min(floor(x), 14.0);
+    int i = int(low), j = i + 1;
+    return mix(table[i >> 2][i & 3], table[j >> 2][j & 3], x - low);
+}
+
+// Sharpening and noise reduction, first of all: the pixel at `at` of that picture, read with
+// its neighbors (counted in pixels of the stored picture, whichever of its two pictures is
+// read). In the square root of its light, where a sensor's noise is as strong in the dark as
+// in the light, a pixel is a lightness (the mean of the three) and a color (what each of the
+// three differs from it by). Noise reduction is the weighted mean of the neighbors', each
+// counting the more the nearer its lightness is to this pixel's (an edge is not blurred
+// across): of the lightness over the eight around and eight a little further, of the color
+// over those and sixteen further out, since a sensor's color noise comes in larger blotches.
+// Sharpening adds what the pixel's lightness differs by from the mean of the eight around it
+// (at `sharpenRadius`), unless that is less than `sharpenMask` (noise, not an edge).
+// `much`: how much of all this is done (none where the photo is seen from far: there is
+// nothing of a pixel's size to see, and the neighbors read would be no neighbors).
+vec3 detailed(sampler2D tex, vec2 at, vec3 centre, float much) {
+    vec2 px = vec2(detailX, detailY);
+    vec3 s0 = sqrt(max(centre, 0.0));
+    float y0 = dot(s0, THIRD), near = max(sharpen > 0.0 ? sharpenRadius : 1.0, 0.5);
+    float nearSum = 0.0, lightSum = y0, lightWeight = 1.0, colorWeight = 1.0;
+    vec3 colorSum = s0 - y0;
+    float keepLight = 1.0 / max(denoise * denoise, 1e-8), keepColor = 1.0 / max(denoiseColor * denoiseColor, 1e-8);
+    for (int i = 0; i < 16; i++) {
+        // The eight around (at `near` pixels), then eight at knight's moves from it.
+        vec2 step = i < 8 ? near * vec2(float((i < 3 ? i : i < 5 ? (i - 3) * 2 : i - 5) - 1), float(i < 3 ? -1 : i < 5 ? 0 : 1))
+                          : vec2(float((i - 8) / 4 == 0 ? 2 : 1) * ((i & 1) == 0 ? 1.0 : -1.0), float((i - 8) / 4 == 0 ? 1 : 2) * ((i & 2) == 0 ? 1.0 : -1.0));
+        if (i >= 8 && denoise <= 0.0 && denoiseColor <= 0.0) break;
+        vec3 s = sqrt(max(texture(tex, at + step * px).rgb, 0.0));
+        float y = dot(s, THIRD), apart = (y - y0) * (y - y0);
+        if (i < 8) nearSum += y;
+        if (denoise > 0.0) { float w = exp(-apart * keepLight); lightSum += w * y; lightWeight += w; }
+        if (denoiseColor > 0.0) { float w = exp(-apart * keepColor); colorSum += w * (s - y); colorWeight += w; }
+    }
+    if (denoiseColor > 0.0) {
+        for (int i = 0; i < 16; i++) {  // two rings, four and seven pixels out, the second turned against the first
+            float turn = (float(i & 7) + (i < 8 ? 0.0 : 0.5)) * 0.7853982;
+            vec3 s = sqrt(max(texture(tex, at + (i < 8 ? 4.0 : 7.0) * vec2(cos(turn), sin(turn)) * px).rgb, 0.0));
+            float y = dot(s, THIRD), w = exp(-(y - y0) * (y - y0) * keepColor);
+            colorSum += w * (s - y); colorWeight += w;
+        }
+    }
+    float light = denoise > 0.0 ? lightSum / lightWeight : y0;
+    vec3 color = denoiseColor > 0.0 ? colorSum / colorWeight : s0 - y0;
+    if (sharpen > 0.0) {
+        float edge = y0 - nearSum / 8.0, floor_ = sharpenMask + denoise * 0.5;
+        light += sharpen * edge * smoothstep(floor_, 2.0 * floor_ + 1e-5, abs(edge));
+    }
+    vec3 s = mix(s0, max(light + color, 0.0), much);
+    return s * s;
+}
+
 void main() {
     // Beyond the picture (the Crop tool shows it turned, in a rectangle larger than it is):
     // nothing; on its edge, as much as the pixel covers, so that a turned edge is smooth and
@@ -277,9 +435,56 @@ void main() {
         return;
     }
     vec3 pixel;
-    if (useSharp > 0.5) pixel = texture(sharp, crisp > 0.5 ? squarely(sharp, qt_TexCoord0) : qt_TexCoord0).rgb;
-    else pixel = texture(source, crisp > 0.5 ? squarely(source, qt_TexCoord0) : qt_TexCoord0).rgb;
+    vec2 here = qt_TexCoord0;   // where in the stored picture this pixel is read
+    float lighter = 1.0;
+    if (lensOn > 0.5) {
+        // Lens corrections: the picture is read a little further out or in than where the
+        // pixel is (distortion), red and blue each a little apart from green (chromatic
+        // aberration), and made lighter toward the corners (vignetting); by how far the
+        // pixel is from the picture's middle, its corner being 1.
+        vec2 out_ = (qt_TexCoord0 - 0.5) * vec2(lensShape, 1.0);
+        float r = length(out_) / length(vec2(lensShape, 1.0) * 0.5);
+        float green = lensAt(lensGreen, r);
+        here = 0.5 + (qt_TexCoord0 - 0.5) * green;
+        lighter = lensAt(lensLight, r);
+        vec2 red = 0.5 + (qt_TexCoord0 - 0.5) * lensAt(lensRed, r), blue = 0.5 + (qt_TexCoord0 - 0.5) * lensAt(lensBlue, r);
+        // (Seen from close, the photo's own pixels as squares here too: each of the three
+        // places is the middle of the pixel it lies in. Left out, a corrected photo was
+        // smooth at any zoom; the owner: "i can no longer see pixels at 200%+ zoom".)
+        if (crisp > 0.5) {
+            if (useSharp > 0.5) { red = squarely(sharp, red); here = squarely(sharp, here); blue = squarely(sharp, blue); }
+            else { red = squarely(source, red); here = squarely(source, here); blue = squarely(source, blue); }
+        }
+        if (useSharp > 0.5) pixel = vec3(texture(sharp, red).r, texture(sharp, here).g, texture(sharp, blue).b);
+        else pixel = vec3(texture(source, red).r, texture(source, here).g, texture(source, blue).b);
+    } else {
+        // (`here` is then the place sharpening and noise reduction read the neighbors from:
+        // the pixel's middle, so that all of a square is one color.)
+        if (crisp > 0.5) here = useSharp > 0.5 ? squarely(sharp, here) : squarely(source, here);
+        pixel = useSharp > 0.5 ? texture(sharp, here).rgb : texture(source, here).rgb;
+    }
+    bool fringes = defringePurple > 0.0 || defringeGreen > 0.0;
+    if (fringes || sharpen > 0.0 || denoise > 0.0 || denoiseColor > 0.0) {
+        // (All of it where a pixel of the photo is a pixel of the screen or larger; none
+        // where two or more of them go into one.)
+        vec2 covered = fwidth(qt_TexCoord0) / vec2(detailX, detailY);
+        float much = clamp(2.0 - max(covered.x, covered.y), 0.0, 1.0);
+        if (much > 0.0 && fringes) {
+            if (useSharp > 0.5) pixel = defringed(sharp, here, pixel, much);
+            else pixel = defringed(source, here, pixel, much);
+        }
+        if (much > 0.0 && (sharpen > 0.0 || denoise > 0.0 || denoiseColor > 0.0)) {
+            if (useSharp > 0.5) pixel = detailed(sharp, here, pixel, much);
+            else pixel = detailed(source, here, pixel, much);
+        }
+    }
+    pixel *= lighter;
     vec3 c = develop(pixel);
+    for (int i = 0; i < 16; i++) {  // the photo's LUTs, one after the other
+        if (float(i) >= lutCount) break;
+        vec4 of = i < 4 ? lutsA[i] : i < 8 ? lutsB[i - 4] : i < 12 ? lutsC[i - 8] : lutsD[i - 12];
+        if (of.y > 0.0) c = mix(c, graded(c, of), of.y);
+    }
     if (showMask > 0.5 && scope < 0.5) {  // a mask: white where it is, on a dim gray of the picture
         float shown = mix(0.04 + 0.22 * clamp(dot(c, LUMA), 0.0, 1.0), 1.0, maskWeight(int(showMask) - 1));
         fragColor = vec4(vec3(linearOut > 0.5 ? pow(shown, 2.2) : shown), 1.0) * qt_Opacity;
@@ -313,7 +518,13 @@ void main() {
                 lab = pinned(lab, shield);
             }
             float chroma = length(lab.yz);
-            if (chroma > 1e-6) {
+            if (mono > 0.5) {
+                // Black and white, in the color tools' place: the color's own lightness, made
+                // lighter or darker for its hue, the less the nearer it is to gray (0.04:
+                // edit.TINTED).
+                float lighter = chroma > 1e-6 ? eqGain(eqA0, eqA1, eqCount, degrees(atan(lab.z, lab.y))) - 1.0 : 0.0;
+                lab = vec3(lab.x * (1.0 + lighter * chroma / (chroma + 0.04)), 0.0, 0.0);
+            } else if (chroma > 1e-6) {
                 float after = chroma * mix(saturation, 1.0, shield);
                 float hue = degrees(atan(lab.z, lab.y));
                 if (vibrance != 0.0) {  // the muted colors, and skin less (edit.vibrance_at)
@@ -329,6 +540,15 @@ void main() {
             }
             if (scope > 3.5 && scope < 5.5) { fragColor = packed(lab, scope > 4.5); return; }
             if (scope > 8.5) { fragColor = vec4(lab, 1.0); return; }
+            if (grain > 0.0) {
+                // Film grain, last of all (not in what the scopes count, which returned
+                // above): lighter and darker by the grain at this place of the stored
+                // picture, as strong as the response curve says for this lightness.
+                vec2 at = qt_TexCoord0 * vec2(grainWide, grainHigh);
+                float strength = grain * max(curveAt(grainX, grainY, grainM, clamp(lab.x, 0.0, 1.0)), 0.0);
+                lab.x = max(lab.x + strength * grainAt(at, 0.0), 0.0);
+                if (grainColor > 0.0) lab.yz += strength * grainColor * 0.5 * vec2(grainAt(at, 211.0), grainAt(at, 467.0));
+            }
             roots = LAB_TO_ROOTS * lab;
         }
         c = fromRoots(roots);

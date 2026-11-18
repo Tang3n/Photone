@@ -9,6 +9,7 @@ Grid {
     id: scopes
     property var source            // the photo's first picture (an Image)
     property var painted           // its painted masks' picture (PhotoView.painted)
+    property var lut: null         // its LUT's picture (PhotoView.lut), or none
     property bool ready: false     // there is a photo to count
     // The edit as numbers, as it was when the renders were last asked for: they are only
     // needed at a count, not at every change of a slider being dragged.
@@ -19,7 +20,7 @@ Grid {
     columns: 3
     Repeater {
         model: 6
-        Pipeline { width: 256; height: 256; source: scopes.source; painted: scopes.painted || scopes.source; edit: scopes.numbers; scope: index; peak: 1; hdrLift: 0; linearOut: 0 }
+        Pipeline { width: 256; height: 256; source: scopes.source; painted: scopes.painted || scopes.source; lutPicture: scopes.lut; edit: scopes.numbers; scope: index; peak: 1; hdrLift: 0; linearOut: 0 }
     }
     Timer {
         id: count

@@ -20,11 +20,8 @@ Item {
     property point center: Qt.point(0.5, 0.5)
     // (More while the Crop tool is open: room round the picture to take hold of it and turn it.)
     readonly property real margin: session.panels.tool === "crop" ? 48 : 14
-    // What floats over the view's right edge (the rail of tools): Fit keeps clear of it, so
-    // that fitted means all of the photo can be seen. Closer than that, the photo goes under it.
-    property real clear: 0
     readonly property real fitZoom: ready
-        ? Math.min((width - 2 * margin - clear) / session.fullWidth, (height - 2 * margin) / session.fullHeight) : 1
+        ? Math.min((width - 2 * margin) / session.fullWidth, (height - 2 * margin) / session.fullHeight) : 1
     readonly property real shown: fitted ? fitZoom : zoom          // the zoom in effect
     readonly property real minZoom: Math.min(fitZoom, 0.1)
     readonly property real maxZoom: 8
@@ -48,7 +45,7 @@ Item {
     function glideTo(z, x, y, toFit) {
         zooming.stop()
         // (Out of Fit first, looking the same: from here on it is a zoom and a place.)
-        if (fitted) { zoom = fitZoom; center = Qt.point(center.x + clear / 2 / photo.width, center.y); fitted = false }
+        if (fitted) { zoom = fitZoom; fitted = false }
         z = toFit ? fitZoom : Math.max(minZoom, Math.min(maxZoom, z))
         going = { z0: zoom, z1: z, x: x, y: y, u: (x - photo.x) / photo.width, v: (y - photo.y) / photo.height, fit: toFit, from: center }
         zooming.start()
@@ -115,9 +112,8 @@ Item {
     }
     // Moving a fitted photo takes it out of Fit, at the size it has (Fit puts it back).
     function panBy(dx, dy) {
-        // (And from where it is: fitted, it stood half the cleared strip to the left.)
         still()
-        if (fitted) { zoom = fitZoom; center = Qt.point(center.x + clear / 2 / photo.width, center.y); fitted = false }
+        if (fitted) { zoom = fitZoom; fitted = false }
         center = Qt.point(held(center.x - dx / photo.width), held(center.y - dy / photo.height))
     }
 
@@ -126,6 +122,14 @@ Item {
     // straight after it and used as soon as the view is closer than the first can show, so
     // crossing that line costs nothing: both are already there.
     readonly property alias picture: pixels   // for the scopes' renders
+    // The open photo's LUTs as the picture the shader reads them from, once it is there; else none.
+    readonly property var lut: lutPixels.status === Image.Ready && lutPixels.sourceSize.width > 1 && String(lutPixels.source) !== "" ? lutPixels : null
+    // (While another is being fetched there is none: the numbers that say where each LUT lies
+    // in it are already the new picture's. It is another only when a LUT is added or taken
+    // away, not when their order, strength or eye changes.)
+    Image { id: lutPixels; source: session.lutSource; asynchronous: true; cache: false; visible: false }
+    readonly property var sharpest: sharpReady ? sharpPixels : pixels   // every pixel of the photo, once it is there (the grain's loupe)
+    readonly property bool sharpThere: sharpReady
     Image {
         id: pixels
         source: session.source
@@ -159,7 +163,7 @@ Item {
         readonly property real by: placed ? view.longest * view.zoom / Math.max(implicitWidth, implicitHeight) : 1
         x: placed ? Math.round(view.width / 2 - view.center.x * width) : view.margin
         y: placed ? Math.round(view.height / 2 - view.center.y * height) : view.margin
-        width: placed ? implicitWidth * by : view.width - 2 * view.margin - view.clear
+        width: placed ? implicitWidth * by : view.width - 2 * view.margin
         height: placed ? implicitHeight * by : view.height - 2 * view.margin
         source: view.standIn; fillMode: Image.PreserveAspectFit; cache: false
     }
@@ -187,9 +191,9 @@ Item {
         objectName: "photo"
         visible: view.ready
         width: Math.round(session.fullWidth * view.shown * view.cropBy); height: Math.round(session.fullHeight * view.shown * view.cropBy)
-        x: Math.round((view.width - (view.fitted ? view.clear : 0)) / 2 - view.center.x * width + view.cropOff.x)
+        x: Math.round(view.width / 2 - view.center.x * width + view.cropOff.x)
         y: Math.round(view.height / 2 - view.center.y * height + view.cropOff.y)
-        source: pixels; painted: view.painted
+        source: pixels; painted: view.painted; lutPicture: view.lut
         sharp: view.sharpReady ? sharpPixels : pixels
         useSharp: view.useSharp ? 1 : 0
         crisp: view.crisp ? 1 : 0
@@ -331,9 +335,9 @@ Item {
     property rect frameWas: Qt.rect(0, 0, 0, 0)   // the frame on the screen, at the last change that was no turn
     property real angleWas: 0
     function laid(by, off) {   // the frame on the screen, were the picture scaled and shifted so
-        const z = fitted ? Math.min((width - 2 * margin - clear) / session.fullWidth, (height - 2 * margin) / session.fullHeight) : zoom
+        const z = fitted ? Math.min((width - 2 * margin) / session.fullWidth, (height - 2 * margin) / session.fullHeight) : zoom
         const w = Math.round(session.fullWidth * z * by), h = Math.round(session.fullHeight * z * by), f = session.framing.frame
-        const x = Math.round((width - (fitted ? clear : 0)) / 2 - center.x * w + off.x), y = Math.round(height / 2 - center.y * h + off.y)
+        const x = Math.round(width / 2 - center.x * w + off.x), y = Math.round(height / 2 - center.y * h + off.y)
         return Qt.rect(x + f[0] * w, y + f[1] * h, (f[2] - f[0]) * w, (f[3] - f[1]) * h)
     }
     function follow() {

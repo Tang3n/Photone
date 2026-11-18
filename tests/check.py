@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from itertools import pairwise  # noqa: E402
 from multiprocessing.shared_memory import SharedMemory  # noqa: E402
 
 from PySide6.QtCore import QCoreApplication, QSettings, Qt, QUrl  # noqa: E402
@@ -30,8 +31,6 @@ from PySide6.QtGui import QColor, QImage  # noqa: E402
 from PySide6.QtQml import QQmlComponent, QQmlEngine  # noqa: E402
 
 from photone import app, catalog, decode, edit, export, library, scopes, shaders  # noqa: E402
-
-os.environ.setdefault("PHOTONE_TRIAL", "old")  # until the audits follow the new Edit screen (docs/open.md D47)
 
 
 def check_store() -> None:
@@ -411,6 +410,258 @@ def check_pins() -> None:
     assert edit.uniforms({}, None, True)["pinCount"] == 0 and not any(edit.uniforms({}, None, True)["pinsA2"])
 
 
+def check_mono() -> None:
+    """Black and white (photone/edit.py): a gray of the color's own lightness, which the B&W
+    EQ makes lighter or darker by hue, the less the nearer the color is to gray; the color
+    grade is kept beside it and untouched."""
+    green, blue = [0.6, -0.1, 0.1], [0.5, -0.02, -0.14]  # hues 135 and 262 degrees
+    assert np.allclose(edit.colors_at({"mono": True, "bw": []}, green), [0.6, 0, 0]), "no look: its lightness"
+    points = edit.valid("bw", [{"hue": 135, "gain": 90, "width": 40}, {"hue": 262, "gain": -20, "width": 500}])
+    assert points == [{"hue": 135.0, "gain": 40.0, "width": 40.0}, {"hue": 262.0, "gain": -20.0, "width": 120.0}], "kept in range"
+    assert abs(edit.bw_at(points, 135) - 1.4) < 1e-12 and abs(edit.bw_at(points, 262) - 0.8) < 1e-12 and edit.bw_at(points, 60) == 1
+    share = math.hypot(-0.1, 0.1) / (math.hypot(-0.1, 0.1) + edit.TINTED)
+    assert np.allclose(edit.colors_at({"mono": True, "bw": points}, green), [0.6 * (1 + 0.4 * share), 0, 0])
+    assert edit.colors_at({"mono": True, "bw": points}, blue)[0] < 0.5, "the blues darker"
+    assert np.allclose(edit.colors_at({"mono": True, "bw": points}, [0.5, 0, 0]), [0.5, 0, 0]), "a gray has no hue: as it is"
+    assert np.allclose(edit.colors_at({"mono": True, "bw": points}, [0.0, -0.1, 0.1]), [0, 0, 0]), "black stays black"
+    grade = {"saturation": 150.0, "pins": edit.valid("pins", [{"from": [0.1, 0.0], "to": [0.1, 0.06]}]), "eq": edit.valid("eq", [{"hue": 135, "gain": 150, "width": 40}])}
+    assert np.allclose(edit.colors_at({**grade, "mono": True, "bw": points}, green), edit.colors_at({"mono": True, "bw": points}, green)), "the color tools do nothing to it"
+    assert edit.clean({**grade, "mono": True}) == {**grade, "mono": True}, "and are kept beside it"
+    assert edit.DEFAULTS["bw"] == edit.FILMS["panchromatic"] and edit.clean({"mono": False, "bw": edit.FILMS["panchromatic"]}) == {}
+    for name, film in edit.FILMS.items():
+        assert edit.valid("bw", film) == film, f"the film look {name} is not as an edit keeps it"
+        assert all(0.59 < edit.bw_at(film, hue) < 1.41 for hue in range(360)), f"{name}: its points add up to more than one point can say"
+    assert edit.bw_at(edit.FILMS["red"], 30) > 1.2 > 0.8 > edit.bw_at(edit.FILMS["red"], 262), "a red filter: reds lighter, blues darker"
+    assert edit.bw_at(edit.FILMS["orthochromatic"], 30) < 0.8 and edit.bw_at(edit.FILMS["orthochromatic"], 262) > 1.1
+    for bad in (1, "yes", None):
+        assert edit.clean({"mono": bad}) == {}, f"mono {bad!r} must be refused"
+    # For the shader: one switch, the color tools at rest, the B&W EQ in the color EQ's place.
+    u = edit.uniforms({**grade, "mono": True, "bw": points}, None, True)
+    assert u["mono"] == 1 and u["look"] == 1 and u["pinCount"] == 0 and u["saturation"] == 1 and u["chromaOn"] == 0
+    assert u["eqCount"] == 2 and np.allclose(u["eqA0"][:8], [135, 0.4, 40, 0, 262, -0.2, 120, 0])
+    assert edit.uniforms(grade, None, True)["mono"] == 0 and edit.uniforms(grade, None, True)["pinCount"] == 1
+    inside = edit.uniforms(edit.merged({"mono": True}, {"eq": grade["eq"], "exposure": 1.0}, None), None, True)
+    assert inside["mono"] == 1 and inside["eq2Count"] == 0 and inside["gain"] == 2, "inside a mask: black and white too, its own color EQ idle"
+
+
+def check_grain() -> None:
+    """Film grain (photone/edit.py): its settings, the characters and responses as sets of
+    them, and the numbers the shader is handed."""
+    rest = edit.uniforms({}, None, True)
+    assert rest["grain"] == 0 and rest["look"] == 0, "no grain: nothing done after the tone curve"
+    for name, character in edit.CHARACTERS.items():
+        assert edit.clean(character) == {k: v for k, v in character.items() if v != edit.DEFAULTS[k]}, name
+    for name, response in edit.RESPONSES.items():
+        assert edit.valid("grainCurve", response) == response and max(p[1] for p in response) == 1, name
+    assert edit.DEFAULTS["grainCurve"] == edit.RESPONSES["print"] and edit.clean({"grainCurve": edit.RESPONSES["print"]}) == {}
+    assert edit.clean({"grain": 250, "grainSize": 0.1, "grainColor": "much", "grainCurve": [[0, 0]]}) == {"grain": 100.0, "grainSize": 0.4}
+    u = edit.uniforms({"grain": 50.0, "grainSize": 2.0, "grainRough": 80.0, "grainColor": 40.0}, None, True, shape=1.5)
+    assert u["look"] == 1 and abs(u["grain"] - 0.15) < 1e-12 and u["grainRough"] == 0.8 and u["grainColor"] == 0.4
+    assert u["grainWide"] == 2000 and abs(u["grainHigh"] - 2000 / 1.5) < 1e-9, "sized by the longer side: half as many at twice the size"
+    upright = edit.uniforms({"grain": 50.0}, None, True, shape=2 / 3)
+    assert abs(upright["grainWide"] - 4000 * 2 / 3) < 1e-9 and upright["grainHigh"] == 4000
+    assert u["grainX"][:3] == [0.0, 0.5, 1.0] and u["grainY"][:3] == [0.0, 1.0, 0.0] and len(u["grainM"]) == 16
+    assert edit.uniforms({"grain": 50.0, "grainColor": 40.0, "mono": True}, None, True)["grainColor"] == 0, "black and white: no colored grain"
+    assert edit.uniforms({"grain": 50.0}, None, True, shape=0.0)["grainWide"] == 4000, "before a photo is there its shape is 0"
+    assert set(edit.TOOLS["grain"]) == {k for k in edit.DEFAULTS if k.startswith("grain")}
+
+
+def check_look() -> None:
+    """A look (photone/edit.py): what of an edit goes to another photo, whole or in parts,
+    and what it leaves of the edit it is laid on."""
+    oval = {"kind": "radial", "at": [0.5, 0.5], "to": [0.7, 0.5]}
+    pins = edit.valid("pins", [{"from": [0.1, 0.0], "to": [0.1, 0.06]}, {"from": [0.0, 0.1], "to": [0.0, 0.05], "mask": 1}])
+    source = edit.clean({"exposure": 0.7, "contrast": 20.0, "temperature": 5200.0, "curve": [[0, 0], [0.5, 0.6], [1, 1]],
+                         "saturation": 130.0, "pins": pins, "masks": [oval], "crop": [0.1, 0.1, 0.9, 0.9], "angle": 3.0,
+                         "grain": 35.0, "mono": True, "bw": edit.FILMS["red"]})
+    look = edit.look_of(source)
+    assert not set(look) & {"masks", *edit.FRAME}, "the frame and the masks are the photo's own"
+    assert look["pins"] == pins[:1] and look["exposure"] == 0.7 and look["bw"] == edit.FILMS["red"], "of the pins, the whole image's"
+    assert set(edit.look_of(source, ["light"])) == {"exposure", "contrast"} and edit.look_of(source, ["balance"]) == {"temperature": 5200.0}
+    assert edit.look_of({"nonsense": 1, "exposure": "much"}) == {}, "cleaned: a preset file is not trusted"
+    assert {key for keys in edit.PARTS.values() for key in keys} | {"masks", *edit.FRAME} == set(edit.DEFAULTS), "every setting is in a part, or is the photo's own"
+    target = edit.clean({"exposure": -1.0, "highlights": -30.0, "tint": 12.0, "vibrance": 40.0, "turns": 1.0, "masks": [oval],
+                         "pins": edit.valid("pins", [{"from": [-0.1, 0.0], "to": [-0.1, 0.03]}, {"from": [0.05, 0.05], "to": [0.0, 0.0], "mask": 1}])})
+    laid = edit.with_look(target, look)
+    assert laid["turns"] == 1.0 and laid["masks"] == target["masks"], "the frame and the masks stay"
+    assert laid["exposure"] == 0.7 and "highlights" not in laid and "tint" not in laid and "vibrance" not in laid, "a part is the look's, at rest where it says nothing"
+    assert laid["pins"] == [pins[0], target["pins"][1]], "the look's pins, and the photo's own masks' pins"
+    part = edit.with_look(target, look, ["balance", "grain"])
+    assert part == {**{k: v for k, v in target.items() if k != "tint"}, "temperature": 5200.0, "grain": 35.0}, "only the parts asked for"
+    assert edit.with_look(target, {}) == {k: target[k] for k in ("turns", "masks")} | {"pins": target["pins"][1:]}, "an empty look: everything of a look at rest"
+    assert edit.with_look(source, edit.look_of(source)) == source, "its own look changes nothing"
+
+
+def check_presets() -> None:
+    """Presets (photone/presets.py): kept by name in a file, cleaned when read, one of the
+    same name replaced; a file that is not what it should be costs nothing but its presets."""
+    from photone import presets
+    with tempfile.TemporaryDirectory() as folder:
+        file = Path(folder) / "deep" / "presets.json"
+        kept = presets.Presets(file)
+        assert kept.all == [] and not kept.error
+        source = {"exposure": 0.7, "temperature": 5200.0, "saturation": 130.0, "crop": [0.1, 0.1, 0.9, 0.9]}
+        assert kept.save("  Warm   day ", source, ["light", "color"]) and kept.all == [
+            {"name": "Warm day", "parts": ["light", "color"], "look": {"exposure": 0.7, "saturation": 130.0}}]
+        assert not kept.save("", source, ["light"]) and not kept.save("x", source, []) and not kept.save("x", source, ["nonsense"])
+        assert kept.save("Cool", {"temperature": 4800.0}, ["balance"]) and not kept.save(" Warm  day", {"exposure": 1.0}, ["light"])
+        assert kept.taken("Warm day ") and not kept.taken("Warm")
+        assert [r["name"] for r in kept.all] == ["Warm day", "Cool"] and kept.all[0]["look"] == {"exposure": 0.7, "saturation": 130.0}, "the same name: refused, the first stays"
+        kept.rename(1, "Warm day")
+        assert kept.all[1]["name"] == "Cool", "a name that is taken is not given twice"
+        kept.rename(1, "Blue hour")
+        again = presets.Presets(file)
+        assert again.all == kept.all and again.all[1]["name"] == "Blue hour", "what was saved is there the next time"
+        again.remove(0)
+        again.remove(7)
+        assert [r["name"] for r in presets.Presets(file).all] == ["Blue hour"]
+        file.write_text(json.dumps([{"name": "Odd", "parts": ["light", "x"], "look": {"exposure": "much", "contrast": 500, "masks": 3}},
+                                    {"name": 5, "parts": ["light"]}, "nonsense", {"name": "No parts", "look": {}}]), "utf-8")
+        assert presets.Presets(file).all == [{"name": "Odd", "parts": ["light"], "look": {"contrast": 100.0}}], "read as untrusted"
+        file.write_text("{ not json", "utf-8")
+        broken = presets.Presets(file)
+        assert broken.all == [] and "could not be read" in broken.error
+    assert presets.Presets().save("In memory", {"exposure": 1.0}, ["light"]), "with no file: kept while the program runs"
+    with tempfile.TemporaryDirectory() as folder:  # (they were recipes for a day: that file is still read)
+        (Path(folder) / "recipes.json").write_text(json.dumps([{"name": "Old", "parts": ["light"], "look": {"exposure": 1.0}}]), "utf-8")
+        moved = presets.Presets(Path(folder) / "presets.json")
+        assert [r["name"] for r in moved.all] == ["Old"] and moved.save("New", {"contrast": 5.0}, ["light"])
+        assert [r["name"] for r in presets.Presets(Path(folder) / "presets.json").all] == ["Old", "New"]
+
+
+def check_lut() -> None:
+    """LUTs (photone/lut.py): a .cube file read as untrusted, its table laid out for the
+    shader, and written again; and the edit's setting for one."""
+    from photone import lut
+    same = lut.identity(5)
+    assert same.shape == (5, 5, 5, 3) and same[4][0][2].tolist() == [0.5, 0.0, 1.0], "indexed [blue][green][red]"
+    text = lut.cube(same, 'My "look"')
+    assert text.startswith('TITLE "My look"\nLUT_3D_SIZE 5\n') and text.count("\n") == 3 + 125
+    assert text.splitlines()[4] == "0.250000 0.000000 0.000000", "red runs fastest"
+    assert np.allclose(lut.parse(text), same, atol=1e-6)
+    spoken = "# a comment\nTITLE \"x\"\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1.0 1.0 1.0\nLUT_3D_SIZE 2\n" + "\n".join(["0 0 0  # black"] * 7 + ["1 1 1"]) + "\n"
+    assert lut.parse(spoken)[1][1][1].tolist() == [1.0, 1.0, 1.0]
+    flat = lut.atlas(same)
+    assert flat.shape == (5, 25, 4) and flat.dtype == np.float16 and flat[1, 3 * 5 + 2].tolist() == [0.5, 0.25, 0.75, 1.0], "slices of one blue side by side, red across, green down"
+    rows = "\n".join(["0 0 0"] * 8)
+    for bad, why in ((f"LUT_1D_SIZE 8\n{rows}", "1D"), (rows, "size"), (f"LUT_3D_SIZE 3\n{rows}", "8 colors where 27"),
+                     (f"LUT_3D_SIZE 99\n{rows}", "99 points"), (f"LUT_3D_SIZE 2\n{rows[:-5]}0 nan 0", "no colors"),
+                     (f"LUT_3D_SIZE 2\n{rows[:-5]}0 b c", "no number"), (f"LUT_3D_SIZE 2\n{rows}\n0 0", "9 colors"),
+                     (f"LUT_3D_SIZE 2\nDOMAIN_MAX 2 2 2\n{rows}", "range"), (f"LUT_3D_SIZE two\n{rows}", "not a number"),
+                     ("x" * (lut.BYTES + 1), "too large")):
+        try:
+            lut.parse(bad)
+            raise AssertionError(f"a file that is no LUT was read: {why}")
+        except ValueError as said:
+            assert why in str(said), f"{why!r} is not in {str(said)!r}"
+    # A photo's LUTs: a list, each an installed one's id, name and size, a strength, on or off.
+    had = {"id": "0a1b2c", "name": "Kodak " * 30, "size": 33, "strength": 250}
+    kept = {"id": "0a1b2c", "name": ("Kodak " * 30)[:80], "size": 33, "strength": 100.0}
+    assert edit.valid("luts", [had, {**had, "id": "ff", "size": 17, "strength": 40, "off": True, "more": 1}]) == [
+        kept, {"id": "ff", "name": kept["name"], "size": 17, "strength": 40.0, "off": True}]
+    assert edit.clean({"luts": []}) == {} and edit.clean({"lut": had}) == {"luts": [kept]}, "one LUT, as a photo had it for a day"
+    for bad in ({**had, "id": "../x"}, {**had, "size": 1}, {**had, "size": 2.5}, {"id": "a"}, "a.cube", {**had, "name": 5}, None):
+        assert edit.clean({"luts": [bad]}) == {}, f"a LUT {bad!r} must be refused"
+    assert edit.clean({"luts": [had] * 17}) == {} and len(edit.clean({"luts": [had] * 16})["luts"]) == 16 == edit.LUTS
+    two = [{**kept, "strength": 40.0}, {"id": "ff", "name": "x", "size": 17, "strength": 80.0, "off": True}, {**kept, "size": 9}]
+    u = edit.uniforms({"luts": two}, None, True)
+    assert u["lutCount"] == 3 and u["lutsA"] == [33, 0.4, 9, 0, 17, 0, 42, 0, 9, 1, 0, 0, 0, 0, 0, 0], "size, strength (none while off), the row its band begins at"
+    many = edit.uniforms({"luts": [kept] * 4 + [{**kept, "strength": 30.0}] + [kept] * 11}, None, True)
+    assert many["lutCount"] == 16 and many["lutsB"][:4] == [33, 0.3, 0, 0] and many["lutsD"][12:] == [33, 1, 0, 0] and not any(u["lutsD"]), "four to a matrix, sixteen in all"
+    assert lut.bands(two) == {("0a1b2c", 9): 0, ("0a1b2c", 33): 9, ("ff", 17): 42} == lut.bands(two[::-1] + two), "by id: whatever their order, and one band for one that is there twice"
+    assert edit.uniforms({}, None, True)["lutCount"] == 0
+    assert edit.look_of({"luts": two})["luts"] == two and "luts" not in edit.look_of({"luts": two}, ["light"]), "LUTs are of a look's colors"
+    # The picture they are read from: each one's slices in a band, one under the other.
+    whole = lut.stacked([lut.identity(3), 1 - lut.identity(5)])
+    assert whole.shape == (8, 25, 4) and whole[1, 2 * 3 + 1].tolist() == [0.5, 0.5, 1.0, 1.0] and whole[3 + 1, 3 * 5 + 2].tolist() == [0.5, 0.75, 0.25, 1.0]
+    assert lut.address(two) == "0a1b2c.9-0a1b2c.33-ff.17" and lut.asked("0a1b2c.33-ff.17") == [("0a1b2c", 33), ("ff", 17)]
+    for bad in ("", "a", "a.1", "../x.9", "a.9-", "a.b", "a.99"):
+        try:
+            lut.asked(bad)
+            raise AssertionError(f"an address {bad!r} must be refused")
+        except ValueError:
+            pass
+    assert lut.title('# x\nTITLE "Warm print"\nLUT_3D_SIZE 2') == "Warm print" and lut.title("LUT_3D_SIZE 2") == ""
+    # Told by its colors: the same table in a file written otherwise is the same LUT.
+    table = 0.2 + 0.6 * lut.identity(3)
+    other = "# from another program\r\n" + lut.cube(table, "Another name").replace("\n", "\r\n").replace("0.500000", "0.5  ")
+    assert other != lut.cube(table, "x") and lut.fingerprint(lut.parse(other)) == lut.fingerprint(lut.parse(lut.cube(table, "x")))
+    assert lut.fingerprint(table) != lut.fingerprint(table + np.float32(0.001)) and lut.fingerprint(lut.identity(3)) != lut.fingerprint(lut.identity(4))
+    assert len(lut.fingerprint(table)) == 20 and lut.fingerprint(table).isalnum(), "it is what the file is kept under"
+
+
+def check_detail() -> None:
+    """Sharpening and noise reduction (photone/edit.py): their settings, and the numbers the
+    shader is handed, which go by the size of the stored picture."""
+    rest = edit.uniforms({}, None, True, shape=1.5, wide=6000)
+    assert rest["sharpen"] == 0.2 and abs(rest["denoise"] - 0.1 ** 1.5 * 0.07) < 1e-12 and rest["denoiseColor"] == 0.025, "what a photo starts with: the owner's"
+    none = edit.uniforms({"sharpen": 0.0, "denoise": 0.0, "denoiseColor": 0.0}, None, True, shape=1.5, wide=6000)
+    assert none["sharpen"] == 0 and none["denoise"] == 0 and none["denoiseColor"] == 0 and edit.clean({"sharpen": 0, "denoise": 10}) == {"sharpen": 0.0}, "0 is off, and is kept"
+    assert rest["detailX"] == 1 / 6000 and abs(rest["detailY"] - 1 / 4000) < 1e-12, "a pixel of the picture, as a share of it"
+    u = edit.uniforms({"sharpen": 80.0, "sharpenRadius": 2.0, "sharpenMask": 50.0, "denoise": 100.0, "denoiseColor": 40.0}, None, True, shape=1.5, wide=6000)
+    assert u["sharpen"] == 0.8 and u["sharpenRadius"] == 2 and u["sharpenMask"] == 0.025 and abs(u["denoise"] - 0.07) < 1e-12 and u["denoiseColor"] == 0.1
+    assert 0.02 < edit.uniforms({"denoise": 50.0}, None, True, wide=6000)["denoise"] < 0.03, "half way is a third of all of it"
+    blind = edit.uniforms({"sharpen": 80.0, "denoise": 100.0, "denoiseColor": 40.0}, None, True)
+    assert blind["sharpen"] == 0 and blind["denoise"] == 0 and blind["denoiseColor"] == 0 and blind["detailX"] == 0, "without the picture's size: none of it"
+    assert edit.clean({"sharpen": 500, "sharpenRadius": 0.1, "denoise": -3, "denoiseColor": "much"}) == {"sharpen": 150.0, "sharpenRadius": 0.5, "denoise": 0.0}
+    assert edit.look_of({"sharpen": 40.0, "denoise": 20.0}, ["detail"]) == {"sharpen": 40.0, "denoise": 20.0} and "sharpen" not in edit.look_of({"sharpen": 40.0}, ["light"])
+
+
+def check_lens() -> None:
+    """Lens corrections (photone/lens.py): the camera's figures read out of a raw file's
+    header as untrusted, and the tables the shader takes."""
+    from photone import lens
+
+    def tiff(tags: dict) -> bytes:  # a header whose picture's directory (0x14a) holds those tags of 16-bit numbers
+        entries, data, at = b"", b"", 8 + 2 + 12 + 4 + 2 + 12 * len(tags) + 4
+        for tag, values in tags.items():
+            packed = struct.pack(f"<{len(values)}h", *values)
+            entries += struct.pack("<HHI", tag, 8, len(values)) + (packed.ljust(4, b"\0") if len(packed) <= 4 else struct.pack("<I", at + len(data)))
+            data += packed if len(packed) > 4 else b""
+        first = struct.pack("<H", 1) + struct.pack("<HHII", 0x14a, 4, 1, 26) + struct.pack("<I", 0)
+        return b"II*\0" + struct.pack("<I", 8) + first + struct.pack("<H", len(tags)) + entries + struct.pack("<I", 0) + data
+
+    far, dim = list(range(0, 800, 50)), [0, 0, *range(512, 7680, 512)]
+    with tempfile.TemporaryDirectory() as folder:
+        file = Path(folder) / "a.arw"
+        file.write_bytes(tiff({0x7037: [16, *far], 0x7032: [16, *dim], 0x7035: [32, *[256] * 16, *[-256] * 16]}))
+        found = lens.figures(file)
+        assert found == {"distortion": far, "vignetting": dim, "red": [256] * 16, "blue": [-256] * 16}, found
+        file.write_bytes(tiff({0x7037: [5, 1, 2, 3, 4, 5]}))
+        assert lens.figures(file) == {"distortion": [1, 2, 3, 4, 5]}, "fewer figures, and only one of the three"
+        for bad in (tiff({0x7037: [40, *far]}), tiff({0x7037: [16, 1, 2]}), tiff({0x7035: [7, 1, 2, 3, 4, 5, 6, 7]}),
+                    tiff({0x7037: [16, *far]})[:60], b"II*\0", b"not a tiff at all", b""):
+            file.write_bytes(bad)
+            assert lens.figures(file) is None, "figures that are not what they say are none"
+        assert lens.figures(Path(folder) / "none.arw") is None
+    none = lens.tables(found, False, False, False)
+    assert none["lensOn"] == 0 and none["lensGreen"] == [1.0] * 16 == none["lensLight"] and lens.tables(None, True, True, True)["lensOn"] == 0
+    bent = lens.tables(found, True, False, False)
+    assert bent["lensOn"] == 1 and bent["lensGreen"][-1] == 1 and bent["lensGreen"][0] < 0.96 and bent["lensRed"] == bent["lensGreen"], "the corner shows the corner; the middle is drawn larger"
+    assert all(a <= b for a, b in pairwise(bent["lensGreen"])) and bent["lensLight"] == [1.0] * 16
+    assert abs(bent["lensGreen"][8] - (1 + lens._at(far, 8 / 15) * 2 ** -14) / (1 + lens._at(far, 1.0) * 2 ** -14)) < 1e-12
+    assert lens._at(far, 0.0) == far[0] and lens._at(far, 0.5 / 15) == far[0] and lens._at(far, 1.5 / 15) == far[1] and lens._at(far, 1.0) == (far[14] + far[15]) / 2
+    fringed = lens.tables(found, False, True, False)
+    assert fringed["lensGreen"] == [1.0] * 16 and abs(fringed["lensRed"][5] - (1 + 256 * 2 ** -21)) < 1e-12 and fringed["lensBlue"][5] < 1
+    lit = lens.tables(found, False, False, True)
+    assert lit["lensLight"][0] == 1 and abs(lit["lensLight"][-1] - 2 ** (2 ** (lens._at(dim, 1.0) * 2 ** -13 - 1) - 0.5)) < 1e-12 and lit["lensLight"][-1] > 1.3
+    u = edit.uniforms({"lensColor": False}, {**edit.FINISHED, "lens": found}, False, shape=1.5)
+    assert u["lensOn"] == 1 and u["lensShape"] == 1.5 and u["lensGreen"] == bent["lensGreen"] == u["lensRed"] and u["lensLight"] == lit["lensLight"]
+    whole = edit.uniforms({}, {**edit.FINISHED, "lens": found}, False, shape=1.5)
+    assert whole["lensOn"] == 1 and whole["lensRed"] != whole["lensGreen"] == bent["lensGreen"], "all three are on until switched off"
+    assert edit.uniforms({}, None, True)["lensOn"] == 0, "no figures: nothing is done, whatever is switched on"
+    # By hand, for any file: red and blue drawn larger or smaller, on top of the figures.
+    hand = lens.tables(None, True, True, True, 50.0, -100.0)
+    assert hand["lensOn"] == 1 and hand["lensGreen"] == [1.0] * 16 and abs(hand["lensRed"][7] - 1 / 1.001) < 1e-12 and abs(hand["lensBlue"][7] - 1 / 0.998) < 1e-12
+    both = lens.tables(found, False, True, False, 50.0)
+    assert abs(both["lensRed"][5] - fringed["lensRed"][5] / 1.001) < 1e-12 and both["lensBlue"] == fringed["lensBlue"]
+    u = edit.uniforms({"caRed": 50.0, "defringePurple": 40.0, "defringeGreen": 100.0}, None, True, shape=1.5, wide=6000)
+    assert u["lensOn"] == 1 and u["lensRed"] == hand["lensRed"] and u["defringePurple"] == 0.4 and u["defringeGreen"] == 1
+    assert edit.uniforms({"defringePurple": 40.0}, None, True)["defringePurple"] == 0, "without the picture's size: no defringe"
+    assert set(edit.TOOLS["lens"]) == {"lensDistortion", "lensColor", "lensVignetting", "caRed", "caBlue", "defringePurple", "defringeGreen"}
+    assert edit.clean({"lensDistortion": True, "lensColor": "yes", "lensVignetting": False}) == {"lensVignetting": False}
+
+
 def check_colors() -> None:
     """Saturation, the chroma curve and the color EQ (photone/edit.py): what each makes of a
     color, and all of them with the pins, in the shader's order."""
@@ -428,9 +679,12 @@ def check_colors() -> None:
     eq = edit.valid("eq", [{"hue": 135, "gain": 150, "width": 40}, {"hue": 495, "gain": 80, "width": 500}])
     assert eq[1] == {"hue": 135.0, "gain": 80.0, "width": 120.0}, "kept in range, the hue once round"
     eq = eq[:1]
-    assert edit.eq_at(eq, 135) == 1.5 and edit.eq_at(eq, 150) == 1.5, "in full within half the width"
-    assert 1 < edit.eq_at(eq, 165) < 1.5 and edit.eq_at(eq, 175) == 1 and edit.eq_at(eq, 315) == 1
-    assert edit.eq_at([{"hue": 350.0, "gain": 0.0, "width": 40.0}], 5) == 0, "round the end of the circle"
+    assert edit.eq_at(eq, 135) == 1.5 and abs(edit.eq_at(eq, 155) - 1.25) < 1e-9, "in full at its hue, half at half the width"
+    assert 1 < edit.eq_at(eq, 165) < 1.25 and edit.eq_at(eq, 175) == 1 and edit.eq_at(eq, 315) == 1
+    steps = [edit.eq_at(eq, 135 + n / 10) for n in range(-450, 451)]
+    assert max(abs(b - a) for a, b in zip(steps, steps[1:], strict=False)) < 0.003, "a bell: no step anywhere along it"
+    assert edit.eq_at([{"hue": 350.0, "gain": 0.0, "width": 40.0}], 350) == 0
+    assert abs(edit.eq_at([{"hue": 350.0, "gain": 0.0, "width": 40.0}], 10) - 0.5) < 1e-9, "round the end of the circle"
     assert edit.eq_at(eq * 2, 135) == 2.0 and edit.eq_at([{"hue": 0.0, "gain": 0.0, "width": 40.0}] * 2, 0) == 0
     assert np.allclose(edit.colors_at({"eq": eq}, green), [0.6, -0.15, 0.15])
     for bad in ("x", [{"hue": 1}], [{"hue": 1, "gain": "much", "width": 30}], [eq[0]] * 9):
@@ -1473,17 +1727,17 @@ def check_session_tools() -> None:
     session.image("0/0/half")
     assert not any(session.adjusted.values()) and set(session.adjusted) == set(edit.TOOLS) and not session.edited
     session.setEdits({"contrast": 30, "shadows": 10})
-    session.setEdit("curve", [[0, 0], [0.5, 0.6], [1, 1]])
+    session.setEdits({"curve": [[0, 0], [0.5, 0.6], [1, 1]], "saturation": 120})
     session.commitEdit()
-    assert [tool for tool, on in session.adjusted.items() if on] == ["tone", "curve"] and session.edited
+    assert [tool for tool, on in session.adjusted.items() if on] == ["tone", "saturation"] and session.edited
     session.setBypass("tone")
     seen = session.uniforms
-    assert seen["contrast"] == 0 and seen["shadows"] == 0 and seen["curveOn"] == 1, "without Tone, and only Tone"
+    assert seen["contrast"] == 0 and seen["shadows"] == 0 and seen["curveOn"] == 0, "without Tone (its curve too), and only Tone"
     session.setBypass("")
     assert session.uniforms["contrast"] > 0
     steps = session.history.at
     session.resetTool("tone")
-    assert session.history.edit == {"curve": [[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]]} and session.history.at == steps + 1
+    assert session.history.edit == {"saturation": 120.0} and session.history.at == steps + 1
     session.resetTool("nonsense")
     session.resetAll()
     assert session.history.edit == {} and session.history.at == steps + 2
@@ -1511,12 +1765,12 @@ def check_session_tools() -> None:
     session.pickNeutral(0.01, 0.99)  # the wedge's black step
     assert session.history.edit == {} and "too bright or too dark" in session.error
 
-    assert session.panels == {"tool": "tone", "histogram": False, "clipping": False, "live": True, "chart": False, "place": "library"}
+    assert session.panels == {"tool": "tone", "clipping": False, "live": True, "chart": False, "place": "library"}
     session.setPanel("tool", "curve")
-    session.setPanel("histogram", True)
-    session.setPanel("histogram", "yes")
+    session.setPanel("clipping", True)
+    session.setPanel("clipping", "yes")
     session.setPanel("nonsense", True)
-    assert session.panels == {"tool": "curve", "histogram": True, "clipping": False, "live": True, "chart": False, "place": "library"}
+    assert session.panels == {"tool": "curve", "clipping": True, "live": True, "chart": False, "place": "library"}
 
     # The test chart in the photo's place: the chart's picture and size, the photo's edit.
     session.setEdit("exposure", 0.5)
@@ -2234,6 +2488,13 @@ def main() -> None:
     check_pins()
     check_frame()
     check_colors()
+    check_mono()
+    check_grain()
+    check_look()
+    check_presets()
+    check_lut()
+    check_detail()
+    check_lens()
     check_masks()
     check_white_balance()
     check_history()

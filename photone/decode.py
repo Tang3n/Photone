@@ -21,6 +21,8 @@ from pathlib import Path
 
 import numpy as np
 
+from photone import lens
+
 RAW = {".arw", ".cr2", ".cr3", ".dng", ".nef", ".orf", ".pef", ".raf", ".rw2"}
 RASTER = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 LUMA = (0.2627, 0.6780, 0.0593)  # how much of the lightness each of Rec.2020's colors is
@@ -123,7 +125,9 @@ def develop_raw(path: Path, half: bool) -> tuple[dict, np.ndarray]:
     except (rawpy.LibRawError, OSError) as e:
         raise Unreadable(f"{path.name}: {e}") from e
     info = meta(path.name, rgb.shape[1], rgb.shape[0], full)
-    info.update(raw=True, camera=about, light=light)
+    # (With the camera's figures for the lens that was on it, where the file has them:
+    # they travel with what is known of the camera, to wherever the shader's numbers are made.)
+    info.update(raw=True, camera={**about, "lens": lens.figures(path)}, light=light)
     return info, rgb
 
 

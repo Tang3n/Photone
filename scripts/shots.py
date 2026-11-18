@@ -42,7 +42,7 @@ from photone import catalog, export, library  # noqa: E402
 from photone import decode, edit, scopes  # noqa: E402
 
 OUT = ROOT / ".dev" / "shots"
-os.environ.setdefault("PHOTONE_TRIAL", "old")  # until the audits follow the new Edit screen (docs/open.md D47)
+os.environ["PHOTONE_TRIAL"] = "presets"  # the Presets tab is a trial for now: shot and audited as one
 BIG, SMALL = (1600, 1000), (1100, 700)
 BACKGROUND = QColor("#0e0e0f")  # Theme.bg
 
@@ -66,6 +66,7 @@ def flat(path: Path, half: bool):
 
 SHELF = tempfile.TemporaryDirectory(prefix="photone-shots-")  # a library of its own: gone at exit
 ON_SHELF: list = [None]  # the library of the shot being taken, for what the shot does to it
+ui.Session.luts_home = Path(SHELF.name) / "luts"  # LUTs installed in a shot: never the owner's
 
 
 def shelf(name: str, marked: bool = True) -> "library.Library":
@@ -106,6 +107,41 @@ def shelf(name: str, marked: bool = True) -> "library.Library":
     if name != "library-raw-only":  # (the shelf's photos are JPEGs: hidden, as the program starts)
         shown.setFilter("raw", False)
     return shown
+
+
+def noisy(path: Path, half: bool):
+    """A photo to try sharpening and noise reduction on, 480 x 320: a gray with a sensor's
+    noise (left third), the same noise over an edge from dark to light (middle third), and a
+    clean edge (right third). The noise is as strong in the square root of the light
+    everywhere, and another in each of red, green and blue."""
+    spread = np.random.default_rng(7).normal(0, 0.03, (320, 480, 3))
+    x = np.arange(480)[None, :, None]
+    roots = np.where(x < 160, 0.45, np.where(x < 240, 0.3, np.where(x < 320, 0.6, np.where(x < 400, 0.3, 0.6))))
+    roots = np.broadcast_to(roots, (320, 480, 3)) + np.where(x < 320, spread, 0)
+    rgb = (np.clip(roots, 0, None) ** 2).astype(np.float32)
+    return {**decode.meta(path.name, 480, 320), "raw": False, "camera": None}, decode.Pixels(decode.pack(rgb))
+
+
+LENS = {"distortion": [round(900 * (n / 15) ** 2) for n in range(16)], "vignetting": [round(9000 * (n / 15) ** 2) for n in range(16)],
+        "red": [12000] * 16, "blue": [-12000] * 16}  # figures as a camera writes them, stronger than a lens has
+
+
+def lensed(path: Path, half: bool):
+    """The chart as a raw file of a camera that wrote down its lens's faults (LENS)."""
+    meta, pixels = decode.synthetic(480, 320)
+    return {**meta, "name": path.name, "camera": {**meta["camera"], "lens": LENS}}, pixels
+
+
+def fringed(path: Path, half: bool):
+    """A photo to try defringe on, 480 x 320: dark on the left, light on the right, and along
+    the edge between them a seam four pixels wide, purple in the upper half and green in the
+    lower; and far from any edge a purple square and a green one, which are things and no
+    fringes."""
+    rgb = np.zeros((320, 480, 3), np.float32)
+    rgb[:, :240], rgb[:, 240:] = 0.02, 0.7
+    rgb[:160, 238:242], rgb[160:, 238:242] = (0.5, 0.12, 0.6), (0.12, 0.5, 0.12)
+    rgb[40:100, 60:120], rgb[220:280, 60:120] = (0.5, 0.12, 0.6), (0.12, 0.5, 0.12)
+    return {**decode.meta(path.name, 480, 320), "raw": False, "camera": None}, decode.Pixels(decode.pack(rgb))
 
 
 def damaged(path: Path, half: bool):
@@ -156,6 +192,26 @@ def CHART_BYTES():  # noqa: N802 - a small picture to stand for an exported one
     return np.stack([np.tile(ramp, (64, 1)), np.tile(ramp[::-1], (64, 1)), np.full((64, 96), 120, np.uint8)], axis=-1)
 
 
+def find_presets(root):
+    """The window's presets (kept nowhere in a shot)."""
+    return root.window().rootContext().contextProperty("presets")
+
+
+def some_luts() -> list[Path]:
+    """A few .cube files made here to stand for ones brought in."""
+    from photone import lut
+    same = lut.identity(17)
+    made = {"Warm print": 0.06 + 0.94 * same ** np.array([0.85, 1.0, 1.25], np.float32),
+            "Cool shadows": same ** np.array([1.15, 1.0, 0.85], np.float32),
+            "Bleach bypass": np.clip((same - 0.5) * 1.3 + 0.5, 0, 1) * 0.6 + same.mean(axis=-1, keepdims=True) * 0.4,
+            "Faded film": 0.1 + 0.8 * same, "Teal and orange": same * np.array([1.08, 0.98, 0.9], np.float32)}
+    files = []
+    for name, table in made.items():
+        files.append(Path(SHELF.name) / f"{name}.cube")
+        files[-1].write_text(lut.cube(np.clip(table, 0, 1), name), "utf-8")
+    return files
+
+
 def exposure(value: float):
     return lambda root, session: session.setEdit("exposure", value)
 
@@ -164,7 +220,7 @@ def edits(values: dict, **panels):
     """A shot's state: these settings, and these panels open."""
     def do(root, session) -> None:
         for key, value in panels.items():
-            session.setPanel(key, value)
+            show(root, value) if key == "tool" else session.setPanel(key, value)
         session.setEdits(values)
     return do
 
@@ -177,7 +233,7 @@ def masked(mask: dict, shown: bool = False, chosen: int = 1):
     """A shot's state: that mask, chosen (or not: 0), and a pin kept to it that darkens what
     it covers; `shown`: with H held, which shows the mask instead of the picture."""
     def do(root, session) -> None:
-        session.setPanel("tool", "")
+        show(root, "masks")
         darker = {"from": [0, 0], "range": 0.5, "feather": 0, "light": -0.25, "mask": 1}
         session.setEdits({"masks": [mask], "pins": [darker]})
         settle()
@@ -191,10 +247,32 @@ def view_of(root):
     return root.window()
 
 
+def show(root, tool: str, *more: str) -> None:
+    """The right column with that card open and at its top, and no other card but `more`:
+    "" is the Tone Wheel, "pins" the pin's settings under it, "curve" the tone curve at the foot
+    of Exposure, "crop" and "masks" their tabs."""
+    call(root, "go", tool if tool in ("crop", "masks") else "edit")
+    cards = {"": "wheel", "pins": "wheel", "crop": "wheel", "masks": "wheel", "curve": "tone"}.get(tool, tool)
+    root.setProperty("unfolded", {**dict.fromkeys(("about", "folders", cards, *more), True)})
+    settle()
+    root.window().grabWindow()  # a frame: the column has its new height once one is drawn
+    if tool not in ("crop", "masks"):
+        bring(root, {"": "wheel-block", "pins": "panel:pins", "curve": "curve-plot"}.get(tool, "panel:" + tool))
+
+
+def bring(root, name: str) -> None:
+    """Scroll the right column until that item is at its top, or as near as the column goes."""
+    scroll = find(root, "tools-scroll")
+    for _ in range(2):  # (twice: what is scrolled into sight may be laid out only then)
+        to = scroll.property("contentY") + box(find(root, name)).top() - box(scroll).top() - 8
+        scroll.setProperty("contentY", max(0.0, min(scroll.property("contentHeight") - scroll.height(), to)))
+        settle()
+        root.window().grabWindow()
+    settle()
+
+
 def opened(session, tool: str | None = None):
     """The window on that session, never shown, with its photo drawn: (view, root)."""
-    if tool is not None:
-        session.setPanel("tool", tool)
     view = ui.make_view(session)
     session.surface_known(False)
     root = view.rootObject()
@@ -202,6 +280,8 @@ def opened(session, tool: str | None = None):
     wait(lambda: root.property("photoReady"))
     settle()
     view.grabWindow()  # a frame: columns and rows only place their items when one is drawn
+    if tool is not None:
+        show(root, tool)
     return view, root
 
 
@@ -281,39 +361,39 @@ SHOTS = {
                                    "brightness": -15, "highlights": -40, "shadows": 55})),
     "develop-flat": (SMALL, photo, lambda root, session: session.setEdit("profile", "flat")),
     "curve": (BIG, photo, edits({"curve": SWING}, tool="curve")),
-    "curve-small": (SMALL, photo, edits({"curve": LIFT, "exposure": -0.5}, tool="curve", histogram=True)),
+    "curve-small": (SMALL, photo, edits({"curve": LIFT, "exposure": -0.5}, tool="curve")),
     "balance": (BIG, photo, edits({"temperature": 6900, "tint": -30}, tool="balance")),
     "balance-pick": (SMALL, photo, lambda root, session: (
-        session.setPanel("tool", "balance"), stage(root).setProperty("picking", "neutral"))),
-    "histogram": (BIG, photo, edits({"exposure": 0.8}, histogram=True, clipping=True)),
+        show(root, "balance"), stage(root).setProperty("picking", "neutral"))),
+    "histogram": (BIG, photo, edits({"exposure": 0.8}, clipping=True)),
     "tools-closed": (SMALL, photo, edits({"contrast": 30}, tool="")),
     "wheel": (BIG, photo, edits({}, tool="")),
     "wheel-all": (BIG, photo, lambda root, session: (
-        session.setPanel("tool", ""), settle(), counted(root.window(), session), call(find(root, "wheel"), "showAll"))),
+        show(root, ""), settle(), counted(root.window(), session), call(find(root, "wheel"), "showAll"))),
     "wheel-close": (BIG, photo, lambda root, session: (
-        session.setPanel("tool", ""), settle(), counted(root.window(), session),
+        show(root, ""), settle(), counted(root.window(), session),
         call(find(root, "wheel"), "zoomAt", 5.0, 150.0, 200.0))),
-    "wheel-range": (BIG, photo, lambda root, session: (session.setPanel("tool", ""), session.setRange("shadows"))),
+    "wheel-range": (BIG, photo, lambda root, session: (show(root, ""), session.setRange("shadows"))),
     "wheel-hover": (SMALL, photo, lambda root, session: (
-        session.setPanel("tool", ""), stage(root).setProperty("hover", QPointF(0.3, 0.4)))),
+        show(root, ""), stage(root).setProperty("hover", QPointF(0.3, 0.4)))),
     "wheel-tone": (SMALL, photo, None),
     "pins": (BIG, photo, lambda root, session: (
-        session.setPanel("tool", ""), settle(), counted(root.window(), session),
+        show(root, ""), settle(), counted(root.window(), session),
         session.setEdit("pins", [{"from": [-0.09, 0.08], "to": [-0.03, 0.12], "range": 0.07},
                                  {"from": [0.1, -0.04], "to": [0.13, -0.1], "mode": "rotate"},
                                  {"from": [0.0, -0.1], "to": [0.0, -0.1], "light": 0.1}]),
         find(root, "wheel").setProperty("selected", 0))),
     "pins-panel": (BIG, photo, lambda root, session: (
-        session.setPanel("tool", "pins"), settle(), counted(root.window(), session),
+        show(root, "pins"), settle(), counted(root.window(), session),
         session.setEdit("pins", [{"from": [-0.09, 0.08], "to": [-0.03, 0.12], "range": 0.07, "light": 0.08, "low": 0.3}]),
         find(root, "wheel").setProperty("selected", 0))),
-    "pins-none": (SMALL, photo, lambda root, session: session.setPanel("tool", "pins")),
+    "pins-none": (SMALL, photo, lambda root, session: show(root, "pins")),
     "pins-reach": (BIG, photo, lambda root, session: (
-        session.setPanel("tool", ""), settle(), counted(root.window(), session),
+        show(root, ""), settle(), counted(root.window(), session),
         session.setEdit("pins", [{"from": [-0.09, 0.08], "to": [-0.03, 0.12], "range": 0.07}]),
         find(root, "wheel").setProperty("selected", 0), stage(root).setProperty("reach", 1))),
     "pins-after": (BIG, photo, lambda root, session: (
-        session.setPanel("tool", ""), session.setPanel("live", True),
+        show(root, ""), session.setPanel("live", True),
         session.setEdit("pins", [{"from": [-0.09, 0.08], "to": [-0.03, 0.12], "range": 0.07},
                                  {"from": [0.1, -0.04], "to": [0.13, -0.1], "mode": "rotate"}]),
         find(root, "wheel").setProperty("selected", 1))),
@@ -346,20 +426,17 @@ SHOTS = {
     "crop-small": (SMALL, photo, edits({"crop": [0.2, 0.3, 0.9, 0.9], "turns": 1.0}, tool="crop")),
     "crop-done": (SMALL, photo, edits({"crop": [0.15, 0.1, 0.8, 0.85], "angle": 5.0}, tool="")),
     "split": (BIG, photo, lambda root, session: (
-        session.setEdits({"exposure": -0.8, "saturation": 30.0}), session.setPanel("tool", ""), stage(root).setProperty("split", 0.45))),
+        session.setEdits({"exposure": -0.8, "saturation": 30.0}), show(root, ""), stage(root).setProperty("split", 0.45))),
     "pins-mark": (SMALL, photo, lambda root, session: (
-        session.setPanel("tool", ""), settle(), counted(root.window(), session),
+        show(root, ""), settle(), counted(root.window(), session),
         call(find(root, "wheel"), "mark", [0.06, 0.09]))),
     "masks": (BIG, photo, masked(OVAL)),
     "masks-linear": (SMALL, photo, masked(SLOPE)),
     "masks-show": (SMALL, photo, masked({**OVAL, "invert": True}, shown=True)),
     "masks-whole": (SMALL, photo, masked(SLOPE, chosen=0)),
     "sections": (BIG, photo, lambda root, session: (
-        checkpoints(session, 2), masked(OVAL)(root, session), session.setPanel("tool", "pins"),
+        checkpoints(session, 2), masked(OVAL)(root, session), show(root, "pins"),
         find(root, "wheel").setProperty("selected", 0))),
-    "rail": (BIG, photo, lambda root, session: (
-        session.setEdits({"exposure": 0.3, "temperature": 6200}), session.setPanel("tool", "tone"),
-        session.setPanel("histogram", True))),
     "strip": (BIG, empty, lambda root, session: (
         session.openAt(ON_SHELF[0].paths(), 3), call(root, "show", "edit"), wait(lambda: root.property("photoReady")),
         wait(lambda: ON_SHELF[0].making == 0 and not ON_SHELF[0].strip, 4000))),
@@ -379,12 +456,56 @@ SHOTS = {
     "strip-small": (SMALL, empty, lambda root, session: (
         session.openAt(ON_SHELF[0].paths(), 9), call(root, "show", "edit"), wait(lambda: root.property("photoReady")),
         root.setProperty("stripHigh", 72), wait(lambda: ON_SHELF[0].making == 0 and not ON_SHELF[0].strip, 4000))),
+    "mono": (BIG, photo, lambda root, session: (session.setEdit("mono", True), show(root, "mono"))),
+    "mono-red": (BIG, photo, lambda root, session: (
+        session.setEdits({"mono": True, "bw": edit.FILMS["red"]}), show(root, "mono"))),
+    "mono-own": (SMALL, photo, lambda root, session: (
+        session.setEdits({"mono": True, "bw": [{"hue": 140, "gain": 30, "width": 60}, {"hue": 262, "gain": -35, "width": 50}]}),
+        show(root, "mono"))),
+    "mono-masks": (SMALL, photo, lambda root, session: (session.setEdit("mono", True), masked(OVAL)(root, session))),
+    "detail": (BIG, photo, lambda root, session: (
+        session.setEdits({"sharpen": 60.0, "sharpenMask": 40.0, "denoise": 50.0, "denoiseColor": 60.0}), show(root, "detail"))),
+    "lens": (BIG, lambda: ui.Session([Path("test chart.arw")], load=lensed), lambda root, session: (
+        session.setEdit("lensColor", False), show(root, "lens"))),
+    "lens-none": (SMALL, photo, lambda root, session: show(root, "lens")),
+    "lens-hand": (BIG, lambda: ui.Session([Path("test chart.arw")], load=lensed), lambda root, session: (
+        session.setEdits({"caRed": 24.0, "caBlue": -12.0, "defringePurple": 60.0}), show(root, "lens"))),
+    "grain": (BIG, photo, lambda root, session: (
+        session.setEdits({**edit.CHARACTERS["bold"], "grainSize": 4.0}), show(root, "grain"))),
+    "grain-own": (SMALL, photo, lambda root, session: (
+        session.setEdits({"grain": 80.0, "grainSize": 4.0, "grainColor": 60.0, "grainCurve": edit.RESPONSES["negative"], "mono": True}),
+        show(root, "grain"))),
+    "presets": (BIG, photo, lambda root, session: (
+        session.setEdits({"contrast": 25.0, "saturation": 120.0}),
+        [find_presets(root).save(name, look, list(edit.PARTS)) for name, look in (
+            ("Warm fade", {"temperature": 6800.0, "contrast": -25.0, "blacks": 40.0, "saturation": 80.0}),
+            ("Red filter", {"mono": True, "bw": edit.FILMS["red"], "contrast": 20.0}),
+            ("Punch", {"contrast": 45.0, "vibrance": 50.0}),
+            ("Pushed film", {**edit.CHARACTERS["pushed"], "grainSize": 4.0, "mono": True, "bw": edit.FILMS["orange"]}),
+            ("Teal shadows", {"pins": [{"from": [0.0, 0.0], "to": [-0.03, -0.02], "range": 0.1, "high": 0.4}]}))],
+        call(root, "go", "presets"))),
+    "presets-none": (SMALL, photo, lambda root, session: call(root, "go", "presets")),
+    "lut": (BIG, photo, lambda root, session: (
+        session.installLuts([str(file) for file in some_luts()]), session.addLut(session.lutsInstalled[3]["id"]),
+        session.addLut(session.lutsInstalled[0]["id"]), session.setLut(0, {"strength": 80.0}), session.setLut(1, {"off": True}),
+        show(root, "lut"), wait(lambda: stage(root).property("lut") is not None, 3000))),
+    "lut-drag": (BIG, photo, lambda root, session: (
+        session.installLuts([str(file) for file in some_luts()]), session.addLut(session.lutsInstalled[3]["id"]),
+        session.addLut(session.lutsInstalled[0]["id"]), show(root, "lut"), wait(lambda: stage(root).property("lut") is not None, 3000),
+        find(root, "panel:lut").setProperty("carried", session.lutsInstalled[4]),
+        find(root, "panel:lut").setProperty("carriedAt", QPointF(box(find(root, "lut-list")).center().x() - 60, box(find(root, "lut-list")).top() + 4 + 28 + 3)))),
+    "lut-none": (SMALL, lambda: (setattr(ui.Session, "luts_home", Path(SHELF.name) / "luts-none"), photo())[1],
+                 lambda root, session: (show(root, "lut"), setattr(ui.Session, "luts_home", Path(SHELF.name) / "luts"))),
+    "lut-lost": (SMALL, photo, lambda root, session: (
+        session.installLuts([str(file) for file in some_luts()]),
+        session.setEdit("luts", [{"id": "gone", "name": "Fuji 3513", "size": 33, "strength": 100.0}]), show(root, "lut"),
+        wait(lambda: stage(root).property("lut") is not None, 3000))),
     "checkpoints": (BIG, photo, lambda root, session: checkpoints(session)),
     "checkpoints-changed": (SMALL, photo, lambda root, session: (
         checkpoints(session), session.setEdit("highlights", -35))),
     "checkpoints-many": (BIG, photo, lambda root, session: checkpoints(session, 9)),
     "checkpoints-low": (SMALL, photo, lambda root, session: (
-        session.setPanel("tool", "curve"), checkpoints(session, 9))),
+        show(root, "curve"), checkpoints(session, 9))),
     "checkpoints-confirm": (BIG, photo, lambda root, session: (
         checkpoints(session), session.setEdit("highlights", -35), settle(),
         click(root.window(), find(root, "checkpoint:1")))),
@@ -418,6 +539,8 @@ def settle() -> None:
         QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 20)
     for window in QGuiApplication.allWindows():  # (a zoom that glides is there at once)
         root = window.rootObject() if hasattr(window, "rootObject") else None
+        if root:
+            QMetaObject.invokeMethod(root, "land")
         view = root and root.findChild(QObject, "box:stage")
         if view:
             QMetaObject.invokeMethod(view, "land")
@@ -864,11 +987,10 @@ def audit_checkpoints() -> list[str]:
 
 
 def audit_column() -> list[str]:
-    """The right column in a low window: Checkpoints is a low section at its foot, four rows at
-    most; the rest above scrolls by the wheel, and so does the list; a drag on the tone curve
-    moves the point and scrolls nothing."""
+    """A low window: Checkpoints stands at the foot of the left panel, the cards over it clear
+    of it; the right column scrolls by the wheel, and so does the checkpoints' list; a drag on
+    the tone curve moves the point and scrolls nothing."""
     session = ui.Session([Path("first.arw")], load=chart)
-    session.setPanel("tool", "curve")
     checkpoints(session, 9)
     session.resetAll()
     view = ui.make_view(session)
@@ -878,14 +1000,14 @@ def audit_column() -> list[str]:
     root.setSize(view.size())
     wait(lambda: root.property("photoReady"))
     view.grabWindow()
+    show(root, "curve")
     faults = Faults()
-    column, foot = box(find(root, "box:tools")), box(find(root, "checkpoints"))
+    left, foot, folders = (box(find(root, name)) for name in ("box:left", "checkpoints", "panel:folders"))
     upper, rows = find(root, "tools-scroll"), find(root, "checkpoint-list")
-    # (Its card reaches 6 px below it, and is to end 10 px above the status line, as far as
-    # it begins below the card over it: the owner saw it standing right on the line.)
-    faults.expect(abs(column.bottom() - foot.bottom() - 16) < 1 and foot.height() <= 170,
-                  f"Checkpoints is not a low section at the foot of the column, its card clear of the status line: {foot.getRect()} in {column.getRect()}")
-    faults.expect(box(upper).bottom() <= foot.top() + 1, "the tools above reach into Checkpoints")
+    faults.expect(abs(left.bottom() - foot.bottom() - 12) < 1, f"Checkpoints is not at the foot of the left panel: {foot.getRect()} in {left.getRect()}")
+    # (A card's ground ends 16 px over the foot of a folded panel, and Checkpoints' begins 8 px
+    # under its top: between the two grounds there are the 8 px that part every pair of cards.)
+    faults.expect(folders.bottom() - 16 <= foot.top() + 1, f"the cards over Checkpoints reach into it: Folders ends at {folders.bottom()}, Checkpoints begins at {foot.top()}")
     faults.expect(upper.property("contentHeight") > upper.height(), "(the window is not low enough to try scrolling)")
 
     def wheel(over, notches: int) -> None:
@@ -895,14 +1017,16 @@ def audit_column() -> list[str]:
             Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False))
         wait(lambda: False, 400)  # the scroll glides to its place
 
-    area = box(find(root, "curve-plot"))
+    area, was = box(find(root, "curve-plot")), upper.property("contentY")
     drag(view, area.center().toPoint(), QPoint(0, -40))
-    faults.expect(upper.property("contentY") == 0 and len(session.history.edit.get("curve", [])) == 3,
-                  f"a drag on the curve scrolled the column or made no point: {upper.property('contentY')}")
+    faults.expect(upper.property("contentY") == was and len(session.history.edit.get("curve", [])) == 3,
+                  f"a drag on the curve scrolled the column or made no point: {was} -> {upper.property('contentY')}")
+    upper.setProperty("contentY", 0)
     wheel(upper, 3)
-    faults.expect(upper.property("contentY") > 20, "the wheel does not scroll the tools")
+    faults.expect(upper.property("contentY") > 20, "the wheel does not scroll the column")
+    rows.setProperty("contentY", rows.property("originY"))
     wheel(rows, 3)
-    faults.expect(rows.property("contentY") > 20, "the wheel does not scroll the checkpoints")
+    faults.expect(rows.property("contentY") - rows.property("originY") > 20, "the wheel does not scroll the checkpoints")
     faults.expect(stage(root).property("fitted"), "a wheel over the column zoomed the photo")
     ui.close_view(view)
     return faults
@@ -974,13 +1098,14 @@ def audit_wheel_data() -> list[str]:
     call(wheel, "showAll")
     settle()
     shot, place = view.grabWindow(), box(wheel)
-    per = place.width() / wheel.property("span")
+    per = place.height() / wheel.property("span")
 
     # The disc itself: red to the right, yellow up, green to the left, blue down.
     def disc(a: float, b: float) -> QColor:
         return shot.pixelColor(round(place.center().x() + a * per), round(place.center().y() - b * per))
 
-    right, up, left, down = disc(0.29, 0.0), disc(0.0, 0.29), disc(-0.29, 0.0), disc(0.0, -0.29)
+    # (Down and a little to the left: straight down, Fit and All lie over the disc.)
+    right, up, left, down = disc(0.29, 0.0), disc(0.0, 0.29), disc(-0.29, 0.0), disc(-0.17, -0.23)
     faults.expect(right.red() > right.green() + 30 and up.blue() < min(up.red(), up.green()) - 30
                   and left.red() < left.green() - 30 and down.blue() > down.red() + 30,
                   f"the wheel's colors are not where they belong: right {right.name()} up {up.name()} "
@@ -1006,7 +1131,7 @@ def audit_wheel_data() -> list[str]:
         wheel.setProperty("middle", QPointF(*middle))
         bare, drawn = wheel_as_drawn(False), wheel_as_drawn(True)
         is_dot = np.abs(drawn - bare).max(axis=2) > 8
-        per, tried, wrong, notes = place.width() / span, 0, 0, []
+        per, tried, wrong, notes = place.height() / span, 0, 0, []
         reach = max(5, round(0.004 * per))  # the photo's colors are sampled: that far to the next dot at most
         for u, v in spots:
             a, b, light = session.colorAt(u, v)
@@ -1091,7 +1216,7 @@ def audit_dots_place() -> list[str]:
         if len(rows) < 12:
             faults.append(f"a photo of one color has no dot on the wheel ({len(rows)} pixels)")
         else:
-            per = place.width() / span
+            per = place.height() / span
             want = (place.width() / 2 + 0.21 * span * per, place.height() / 2 + 0.13 * span * per)
             off = float(np.hypot(columns.mean() + 0.5 - want[0], rows.mean() + 0.5 - want[1]))
             # How far off it would be with a and b kept to 0.0005: a color that would be near
@@ -1233,7 +1358,7 @@ def audit_pins() -> list[str]:
     call(wheel, "showAll")
     settle()
     place = box(wheel)
-    per = place.width() / wheel.property("span")
+    per = place.height() / wheel.property("span")
 
     def at(a: float, b: float) -> QPoint:
         return QPoint(round(place.center().x() + a * per), round(place.center().y() - b * per))
@@ -1439,13 +1564,13 @@ def audit_masks_data() -> list[str]:
 
 
 def audit_masks() -> list[str]:
-    """Masks under a real mouse and keyboard: "+ Radial" makes one and chooses it, its shape is
-    on the photo, each handle does its own thing in one step of undo, a pin made meanwhile is
-    kept to it and cannot be taken hold of from "Whole image", Invert and Delete do what they
-    say (Delete takes the mask's pins along, undo brings all back), H shows the mask, and
-    there is no ninth."""
+    """Masks under a real mouse and keyboard, in the Masks tab: "+ Radial" makes one and chooses
+    it, its shape is on the photo, each handle does its own thing in one step of undo, a pin
+    made meanwhile is kept to it and cannot be taken hold of from the Adjust tab (the whole
+    image), Inverted and the row's bin do what they say (the bin takes the mask's pins along,
+    undo brings all back), H shows the mask, and there is no ninth."""
     session = ui.Session([Path("first.arw")], load=chart)
-    view, root = opened(session, "")
+    view, root = opened(session, "masks")
     faults = Faults()
     counted(view, session)
     wheel, frame = find(root, "wheel"), find(root, "mask-frame")
@@ -1466,10 +1591,17 @@ def audit_masks() -> list[str]:
 
     def press(name: str) -> None:
         click(view, find(root, name))
-        view.grabWindow()  # a frame: the chips are only put in their places when one is drawn
+        view.grabWindow()  # a frame: the list's rows are only put in their places when one is drawn
+
+    def tab(name: str) -> None:  # that tab of the column, the Tone Wheel in sight
+        bring(root, "modes")
+        press("mode:" + name)
+        if name == "masks":
+            press("mask-item:1")
+        bring(root, "wheel-block")
 
     faults.expect(not frame.isVisible() and wheel.property("mask") == 0, "a mask is on show before there is one")
-    press("mask:radial")
+    press("add-mask:radial")
     faults.expect(len(masks()) == 1 and wheel.property("mask") == 1 and frame.isVisible(),
                   f"+ Radial gave {masks()}, chosen: {wheel.property('mask')}")
     faults.expect(masks() and near(masks()[0]["at"], (0.5, 0.5)), "the new mask is not in the middle of the photo")
@@ -1520,26 +1652,26 @@ def audit_masks() -> list[str]:
     settle()
 
     # A pin made while the mask is chosen is the mask's.
+    bring(root, "wheel-block")
     call(wheel, "showAll")
     settle()
-    per = box(wheel).width() / wheel.property("span")
+    per = box(wheel).height() / wheel.property("span")
 
     def spot() -> QPoint:  # a color on the wheel, wherever the wheel is just now
         return QPoint(round(box(wheel).center().x() + 0.05 * per), round(box(wheel).center().y() - 0.10 * per))
 
-    top = box(wheel).top()
     tap(view, spot())
     drag(view, spot(), QPoint(40, -30))
     pins = session.history.edit.get("pins", [])
     faults.expect(len(pins) == 1 and pins[0]["mask"] == 1, f"a pin made with the mask chosen: {pins}")
     key(Qt.Key.Key_Escape)
-    press("mask:0")
-    faults.expect(wheel.property("mask") == 0 and not frame.isVisible(), "Whole image leaves the mask on the photo")
-    faults.expect(box(wheel).top() == top, f"choosing Whole image moved the wheel from {top} to {box(wheel).top()}")
+    tab("edit")
+    faults.expect(wheel.property("mask") == 0 and not frame.isVisible(), "the Adjust tab leaves the mask on the photo")
     tap(view, spot() + QPoint(40, -30))
-    faults.expect(wheel.property("selected") == -1, "a mask's pin can be taken hold of from Whole image")
+    faults.expect(wheel.property("selected") == -1, "a mask's pin can be taken hold of from the Adjust tab")
     key(Qt.Key.Key_Escape)
-    press("mask:1")
+    tab("masks")
+    faults.expect(wheel.property("mask") == 1 and frame.isVisible(), "a click on a mask's row does not choose it")
     tap(view, spot() + QPoint(40, -30))
     faults.expect(wheel.property("selected") == 0, "the mask's pin cannot be taken hold of with its mask chosen")
     key(Qt.Key.Key_H)
@@ -1551,18 +1683,22 @@ def audit_masks() -> list[str]:
     key(Qt.Key.Key_H, QEvent.Type.KeyRelease)
     faults.expect(stage(root).property("showMask") == 0, "letting go of H leaves the mask on show")
 
-    press("mask:invert")
-    faults.expect(masks()[0]["invert"] is True, "Invert does not turn the mask inside out")
-    press("mask:invert")
-    faults.expect(masks()[0]["invert"] is False, "Invert a second time does not turn it back")
+    bring(root, "panel:masks")
+    press("mask:inverted")
+    faults.expect(masks()[0]["invert"] is True, "Inverted does not turn the mask inside out")
+    press("mask:inverted")
+    faults.expect(masks()[0]["invert"] is False, "Inverted a second time does not turn it back")
     steps = session.steps
-    press("mask:delete")
+    QTest.mouseMove(view, middle("mask-item:1"), 300)  # (the row's bin is there while the pointer is on the row)
+    settle()
+    view.grabWindow()
+    press("mask-delete:1")
     faults.expect(masks() == [] and session.history.edit.get("pins", []) == [] and wheel.property("mask") == 0
                   and not frame.isVisible(), f"Delete left {session.history.edit}")
     session.undo()
     faults.expect(len(masks()) == 1 and len(session.history.edit.get("pins", [])) == 1,
                   "undoing Delete does not bring back the mask and its pin at once")
-    press("mask:linear")
+    press("add-mask:linear")
     faults.expect(len(masks()) == 2 and masks()[1]["kind"] == "linear" and wheel.property("mask") == 2
                   and find(root, "mask-middle").isVisible() and not find(root, "mask:side").isVisible(),
                   f"+ Linear gave {masks()[1:]}")
@@ -1606,7 +1742,7 @@ def audit_masks() -> list[str]:
     for _ in range(6):
         session.addMask("linear")
     settle()
-    faults.expect(len(masks()) == 8 and not find(root, "mask:radial").isVisible(), "eight masks, and still a + to press")
+    faults.expect(len(masks()) == 8 and not find(root, "add-mask:radial").isVisible(), "eight masks, and still a + to press")
     faults.expect(session.addMask("radial") == 0 and len(masks()) == 8 and "eight" in session.error, "a ninth mask")
     faults += audit_layout(view)
     ui.close_view(view)
@@ -1656,8 +1792,8 @@ def audit_pin_panel() -> list[str]:
     key(QEvent.Type.KeyRelease, Qt.Key.Key_H)
     faults.expect(view.grabWindow().pixelColor(spot) == usual, "letting go of H does not bring the picture back")
 
-    click(view, find(root, "rail:Pin"))
-    faults.expect(find(root, "panel:pins").isVisible() and find(root, "pin:range").property("enabled"), "the Pin tool does not open the pin's panel")
+    show(root, "pins")
+    faults.expect(find(root, "panel:pins").isVisible() and find(root, "pin:range").property("enabled"), "the pin's settings are not under the wheel, or not for the pin taken up")
     view.grabWindow()  # a frame: the panel's rows take their places
     tall, stood = find(root, "panel:pins").height(), box(wheel).top()
     click(view, find(root, "pin-kind:rotate"))
@@ -1685,8 +1821,9 @@ def audit_pin_panel() -> list[str]:
                   f"moving Feather with a color marked does not make it a pin: {pins()[1:]}")
     session.undo()
     faults.expect(len(pins()) == 1, "a pin made from the Pin section is more than one step of undo")
-    click(view, find(root, "reset:pins"))
-    faults.expect(pins() == [], "Reset on the Pin panel does not remove every pin")
+    show(root, "")
+    click(view, find(root, "reset:wheel"))
+    faults.expect(pins() == [], "Reset on the Tone Wheel's card does not remove every pin")
     session.undo()
     faults.expect(len(pins()) == 1, "removing every pin is not one step of undo")
     ui.close_view(view)
@@ -1694,8 +1831,8 @@ def audit_pin_panel() -> list[str]:
 
 
 def audit_color_tools() -> list[str]:
-    """Saturation, the color EQ and the chroma curve under a real mouse: their tools on the
-    rail and S; the saturation slider; a point made and moved on the chroma curve; on the EQ a
+    """Saturation, the color EQ and the chroma curve under a real mouse: their cards, and S;
+    the saturation slider; a point made and moved on the chroma curve; on the EQ a
     click that changes nothing, a point made by dragging the line, moved, widened by the mouse
     wheel, removed by a double click."""
     session = ui.Session([Path("first.arw")], load=chart)
@@ -1703,15 +1840,10 @@ def audit_color_tools() -> list[str]:
     faults = Faults()
     counted(view, session)
 
-    def show(name: str, panel: str) -> None:
-        click(view, find(root, f"rail:{name}"))
-        view.grabWindow()  # a frame: the panel's rows take their places
-        faults.expect(find(root, f"panel:{panel}").isVisible(), f"{name} on the rail does not open its panel")
-
     QCoreApplication.sendEvent(root, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_S, Qt.KeyboardModifier.NoModifier))
     settle()
     view.grabWindow()
-    faults.expect(find(root, "panel:saturation").isVisible(), "S does not open Saturation")
+    faults.expect(find(root, "panel:saturation").property("open") and find(root, "slider:saturation").isVisible(), "S does not open Saturation")
     slider = find(root, "slider:saturation")
     track = slider.findChild(QObject, "track")
     drag(view, box(slider.findChild(QObject, "thumb")).center().toPoint(), QPoint(40, 0))  # (by its thumb)
@@ -1721,7 +1853,7 @@ def audit_color_tools() -> list[str]:
     click(view, find(root, "reset:saturation"))
     faults.expect(session.edit["saturation"] == 100, "Reset does not put Saturation back to 100 %")
 
-    show("Chroma curve", "chroma")
+    show(root, "chroma")
     area = box(find(root, "chroma-plot"))
     w, h = area.width() - 16, area.height() - 16
     drag(view, QPoint(round(area.left() + 8 + 0.25 * w), round(area.top() + 8 + 0.75 * h)), QPoint(0, -round(0.2 * h)))
@@ -1731,7 +1863,7 @@ def audit_color_tools() -> list[str]:
     faults.expect("curve" not in session.history.edit, "the chroma curve's editor changed the tone curve")
     session.undo()
 
-    show("Color EQ", "eq")
+    show(root, "eq")
     area = box(find(root, "eq-plot"))
     w, h = area.width() - 16, area.height() - 16
 
@@ -2192,7 +2324,9 @@ def audit_crop() -> list[str]:
     wide = 480 * np.cos(lean) + 320 * np.sin(lean)
     faults.expect(abs(session.fullWidth - wide) <= 1, f"straightening, the tool shows {session.fullWidth} px across, not the turned picture's {wide:.0f}")
     shot = view.grabWindow()
-    corner = shot.pixelColor(int(area.left()) + 3, int(area.top()) + 3)
+    # (The frame fills the view, so the turned picture may reach under the left panel: the
+    # corner looked at is the first of it that is in the view.)
+    corner = shot.pixelColor(int(max(area.left(), box(stage(root)).left())) + 3, int(area.top()) + 3)
     faults.expect(max(corner.getRgb()[:3]) <= 15, f"beyond the turned picture's corner there is {corner.name()}, not nothing")
 
     def grays_from(share: float) -> int:  # the row at which the chart's grays begin, that far across the view
@@ -2237,7 +2371,7 @@ def audit_crop() -> list[str]:
     session.setEdit("exposure", -1.5)
     session.commitEdit()
     # A drag just outside the frame turns the picture under it, the way the pointer goes.
-    session.setPanel("tool", "crop")
+    show(root, "crop")
     settle()
     tip = find(root, "screen:tip")
     faults.expect(tip.isVisible() and "straighten" in tip.property("says"), f"opening Crop shows no tip at the top of the photo: {tip.property('says')!r}")
@@ -2298,7 +2432,7 @@ def audit_crop() -> list[str]:
     call(stage(root), "reshape", 0.0)
     session.setEdit("angle", 0.0)
     session.commitEdit()
-    session.setPanel("tool", "")
+    show(root, "")
     settle()
     area = box(root.findChild(QObject, "photo"))
     at = [QPoint(int(area.left() + area.width() * share), int(area.top() + area.height() * 0.92)) for share in (0.31, 0.69)]
@@ -2330,8 +2464,8 @@ def audit_wheel() -> list[str]:
 
     def under(at: QPointF) -> tuple[float, float]:  # the a, b drawn at that point of the window
         span, middle = wheel.property("span"), wheel.property("middle")
-        return (middle.x() + (at.x() - place.center().x()) / place.width() * span,
-                middle.y() - (at.y() - place.center().y()) / place.width() * span)
+        return (middle.x() + (at.x() - place.center().x()) / place.height() * span,
+                middle.y() - (at.y() - place.center().y()) / place.height() * span)
 
     def key(which) -> None:
         QCoreApplication.sendEvent(root, QKeyEvent(QEvent.Type.KeyPress, which, Qt.KeyboardModifier.NoModifier))
@@ -2354,8 +2488,8 @@ def audit_wheel() -> list[str]:
     before, span = wheel.property("middle"), wheel.property("span")
     drag(view, at.toPoint(), QPoint(40, 30))
     moved = wheel.property("middle")
-    faults.expect(abs(moved.x() - before.x() + 40 / place.width() * span) < 1e-6
-                  and abs(moved.y() - before.y() - 30 / place.width() * span) < 1e-6, "a drag does not move the wheel's view with the pointer")
+    faults.expect(abs(moved.x() - before.x() + 40 / place.height() * span) < 1e-6
+                  and abs(moved.y() - before.y() - 30 / place.height() * span) < 1e-6, "a drag does not move the wheel's view with the pointer")
     key(Qt.Key.Key_0)
     faults.expect(wheel.property("all"), "0 does not show the whole wheel")
     key(Qt.Key.Key_F)
@@ -2384,7 +2518,7 @@ def audit_wheel() -> list[str]:
     probe = probe.toVariant() if hasattr(probe, "toVariant") else probe  # an empty list comes as a JS value
     faults.expect(len(probe) == 3 and np.allclose(probe, want, atol=0.01), f"the pointer on the photo gives the wheel {probe}, not {want}")
     if len(probe) == 3:
-        per = place.width() / wheel.property("span")
+        per = place.height() / wheel.property("span")
         cross = view.grabWindow().pixelColor(round(place.center().x() + probe[0] * per) + 9, round(place.center().y() - probe[1] * per))
         faults.expect(min(cross.red(), cross.green(), cross.blue()) > 190, f"no cross on the wheel at that color: {cross.name()}")
         tick = box(find(root, "lightness-tick"))
@@ -2520,10 +2654,10 @@ def audit_moves() -> list[str]:
     # added up and change the photo once or twice, and the pin ends where forty would take it.
     session.setEdit("pins", [{"from": [0.05, 0.02], "to": [0.05, 0.02], "range": 0.08}])
     session.commitEdit()
-    settle()
+    show(root, "")
     wheel = find(root, "wheel")
-    middle, span, side = wheel.property("middle"), wheel.property("span"), wheel.width()  # (Wheel.px, Wheel.py)
-    spot = QPointF(box(wheel).x() + side / 2 + (0.05 - middle.x()) / span * side,
+    middle, span, side = wheel.property("middle"), wheel.property("span"), wheel.height()  # (Wheel.px, Wheel.py: by its height)
+    spot = QPointF(box(wheel).center().x() + (0.05 - middle.x()) / span * side,
                    box(wheel).y() + wheel.height() / 2 - (0.02 - middle.y()) / span * side)
     QTest.qWait(60)
     before = told[0]
@@ -2738,6 +2872,9 @@ def audit_strip() -> list[str]:
     faults.expect(shown.marksOf(shown.paths()[2]) == {"flag": 0, "stars": 0, "label": 0, "edited": False}, f"the same clicks again do not take the marks away: {shown.marksOf(shown.paths()[2])}")
     QTest.mouseMove(view, box(stage(root)).center().toPoint())
     settle()
+    call(strip, "bringBack")  # (the open photo in sight again: the row was put at its start)
+    settle()
+    view.grabWindow()
     bar, back = find(root, "strip-bar"), find(root, "strip-back")
     faults.expect(bar.isVisible() and not back.isVisible(), f"no scrollbar under the strip, or a way back while the open photo is in sight: bar {bar.isVisible()}, back {back.isVisible()}, at {row.property('contentX'):.0f} of {row.property('contentWidth'):.0f}, open {session.index}")
     session.goTo(1)  # (one that the end of the row leaves out of sight)
@@ -2793,7 +2930,9 @@ def audit_strip() -> list[str]:
         settle()
         return view.grabWindow().pixelColor(box(cell).center().toPoint())
 
-    row.setProperty("contentX", 0)
+    call(strip, "bringBack")
+    settle()
+    view.grabWindow()
     plain_ = view.grabWindow().pixelColor(box(find(root, "strip:5")).center().toPoint())
     session.setEdits({"exposure": -2.5, "crop": [0.0, 0.0, 0.4, 1.0]})
     session.commitEdit()
@@ -2878,12 +3017,19 @@ def audit_menu() -> list[str]:
     call(root, "show", "edit")
     wait(lambda: root.property("photoReady"))
     view.grabWindow()
+    along = find(root, "strip-row")  # (to its end: the cell of a photo that far along is there)
+    along.setProperty("contentX", along.property("originX") + along.property("contentWidth") - along.width())
+    settle()
+    view.grabWindow()
     right(find(root, f"strip:{row}"))
     faults.expect(menu.isVisible(), "a right click on a photo of the filmstrip opens no menu")
     click(view, find(root, "menu-reset"))
     click(view, find(root, "confirm-yes"))
     faults.expect(edit_of(row) == {} and session.index == 1 and session.history.edit == {"contrast": 0.3},
                   f"reset from the filmstrip, the photo has {edit_of(row)}; the open one {session.history.edit}")
+    call(find(root, "box:strip"), "bringBack")  # (the open photo's cell, and those beside it, in sight)
+    settle()
+    view.grabWindow()
     right(find(root, "strip:1"))
     click(view, find(root, "menu-reset"))
     click(view, find(root, "confirm-yes"))
@@ -2894,10 +3040,10 @@ def audit_menu() -> list[str]:
     # right click on one of them exports them all at once, as the Export page is set up.
     strip = find(root, "box:strip")
     held = lambda cell, key: (QTest.mouseClick(view, Qt.MouseButton.LeftButton, key, box(find(root, cell)).center().toPoint()), settle())  # noqa: E731
-    held("strip:3", Qt.KeyboardModifier.ControlModifier)
-    faults.expect(plain(strip.property("chosen")) == [1, 3] and session.index == 1, f"Ctrl+click in the filmstrip selects {plain(strip.property('chosen'))}")
-    held("strip:5", Qt.KeyboardModifier.ShiftModifier)
-    faults.expect(plain(strip.property("chosen")) == [3, 4, 5], f"Shift+click in the filmstrip selects {plain(strip.property('chosen'))}")
+    held("strip:2", Qt.KeyboardModifier.ControlModifier)
+    faults.expect(plain(strip.property("chosen")) == [1, 2] and session.index == 1, f"Ctrl+click in the filmstrip selects {plain(strip.property('chosen'))}")
+    held("strip:4", Qt.KeyboardModifier.ShiftModifier)
+    faults.expect(plain(strip.property("chosen")) == [2, 3, 4], f"Shift+click in the filmstrip selects {plain(strip.property('chosen'))}")
     call(root, "show", "export")
     settle()
     faults.expect(len(plain(find(root, "box:export").property("photos"))) == 3 and find(root, "export-go").property("label") == "Export 3 photos"
@@ -2907,7 +3053,7 @@ def audit_menu() -> list[str]:
     settle()
     out = Path(tempfile.mkdtemp(prefix="photone-menu-", dir=SHELF.name))
     find(root, "box:export").setProperty("folder", str(out))
-    right(find(root, "strip:4"))
+    right(find(root, "strip:3"))
     faults.expect(find(root, "menu-export").property("label") == "Export all (3)", f"the menu of three selected photos offers {find(root, 'menu-export').property('label')!r}")
     click(view, find(root, "menu-export"))
     faults.expect(session.exporter.running and session.exporter.total == 3 and root.property("place") == "edit",
@@ -2915,10 +3061,469 @@ def audit_menu() -> list[str]:
     faults.expect("Exporting" in find(root, "foot-export").property("text"), "the footer does not say that an export runs")
     session.exporter.stop()
     carry_out(view, session)
-    click(view, find(root, "strip:2"))
-    faults.expect(plain(strip.property("chosen")) == [] and session.index == 2, "a plain click in the filmstrip does not open the photo and end the selection")
+    click(view, find(root, "strip:0"))
+    faults.expect(plain(strip.property("chosen")) == [] and session.index == 0, "a plain click in the filmstrip does not open the photo and end the selection")
     shown.close()
     ui.close_view(view)
+    return faults
+
+
+def audit_look() -> list[str]:
+    """A look copied from one photo and laid on others, with a real mouse and keys: from the
+    menu in the library onto those selected, each in the catalog as a step of its own; by
+    Ctrl+Shift+V onto the open photo as one step of undo, its frame and masks left alone."""
+    shown = shelf("look-audit")  # (its ninth photo has an edit: exposure 0.5)
+    session = ui.Session([], catalog=shown.catalog)
+    view = ui.make_view(session, shown)
+    session.surface_known(False)
+    root = view.rootObject()
+    root.setSize(view.size())
+    settle()
+    view.grabWindow()
+    faults, kept, menu = Faults(), shown.catalog, find(root, "modal:menu")
+
+    def right(item) -> None:
+        QTest.mouseMove(view, box(item).center().toPoint(), 500)
+        QTest.mouseClick(view, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, box(item).center().toPoint())
+        settle()
+        view.grabWindow()
+
+    def edit_of(row: int) -> dict:
+        photo = shown.model.rows[row]
+        return kept.load(photo["key"], Path(photo["path"]))
+
+    def keys(letter) -> None:
+        QTest.keyClick(view, letter, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+        settle()
+
+    source = next(n for n, photo in enumerate(shown.model.rows) if photo["edited"])
+    others = [n for n in range(len(shown.model.rows)) if n != source][:2]
+    kept.save(shown.model.rows[others[1]]["key"], Path(shown.model.rows[others[1]]["path"]), {"contrast": 30.0, "turns": 1.0})
+    right(find(root, f"photo:{others[0]}"))
+    faults.expect(find(root, "menu-copy-look").isVisible() and not find(root, "menu-paste-look").isVisible(), "Paste look is offered before a look was copied")
+    click(view, find(root, "menu-copy-look"))
+    faults.expect(shown.hasLook and shown.look == {}, f"the look of a photo without an edit is {shown.look}")
+    right(find(root, f"photo:{source}"))
+    click(view, find(root, "menu-copy-look"))
+    faults.expect(shown.look == {"exposure": 0.5}, f"Copy look took {shown.look}")
+    tap(view, box(find(root, f"photo:{others[0]}")).center().toPoint())
+    QTest.mouseClick(view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, box(find(root, f"photo:{others[1]}")).center().toPoint())
+    settle()
+    right(find(root, f"photo:{others[1]}"))
+    faults.expect(find(root, "menu-paste-look").property("label") == "Paste look on all (2)" and not find(root, "menu-copy-look").isVisible(),
+                  f"the menu of two selected photos offers {find(root, 'menu-paste-look').property('label')!r}")
+    click(view, find(root, "menu-paste-look"))
+    wait(lambda: shown.making == 0, 4000)
+    faults.expect(edit_of(others[0]) == {"exposure": 0.5} and edit_of(others[1]) == {"exposure": 0.5, "turns": 1.0},
+                  f"pasted on two photos: {edit_of(others[0])} and {edit_of(others[1])} (the second had Contrast and a turn)")
+    steps = kept.steps(shown.model.rows[others[1]]["key"])
+    faults.expect(steps == ([{"contrast": 30.0, "turns": 1.0}, {"exposure": 0.5, "turns": 1.0}], 1), f"a pasted look is no step that undo could take back: {steps}")
+    faults.expect(shown.model.rows[others[0]]["edited"], "a photo with a pasted look is not marked as edited")
+    # In Edit: onto the open photo by the keys, and from it.
+    session.openAt(shown.paths(), others[1])
+    call(root, "show", "edit")
+    wait(lambda: root.property("photoReady"))
+    view.grabWindow()
+    session.setEdits({"saturation": 140.0, "masks": [OVAL], "crop": [0.1, 0.1, 0.9, 0.9]})
+    session.commitEdit()
+    was, at = dict(session.history.edit), session.history.at
+    keys(Qt.Key.Key_V)
+    faults.expect(session.history.edit == {"exposure": 0.5, "turns": 1.0, "masks": was["masks"], "crop": was["crop"]} and session.history.at == at + 1,
+                  f"Ctrl+Shift+V on the open photo gave {session.history.edit} in {session.history.at - at} steps")
+    session.undo()
+    faults.expect(session.history.edit == was, "undo does not take a pasted look back")
+    keys(Qt.Key.Key_C)
+    faults.expect(shown.look == {"exposure": 0.5, "saturation": 140.0}, f"Ctrl+Shift+C on the open photo took {shown.look}")
+    faults.extend(audit_layout(view))
+    shown.close()
+    ui.close_view(view)
+    return faults
+
+
+def audit_presets() -> list[str]:
+    """Presets under a real mouse and keyboard: the look of the open photo kept under a name
+    with the parts chosen, shown as a picture of the photo with it, laid on a photo by a
+    click as one step of undo and only in those parts, renamed, and deleted after a question."""
+    session = ui.Session([Path("first.arw")], load=chart)
+    view, root = opened(session)
+    faults, kept = Faults(), find_presets(root)
+    session.setEdits({"contrast": 30.0, "temperature": 6400.0, "saturation": 140.0, "crop": [0.1, 0.1, 0.9, 0.9]})
+    session.commitEdit()
+    click(view, find(root, "mode:presets"))
+    view.grabWindow()
+    faults.expect(find(root, "panel:presets").isVisible() and not find(root, "panel:tone").isVisible(), "the Presets tab does not show")
+    click(view, find(root, "preset-keep"))
+    faults.expect(kept.all == [], "a preset was saved without a name")
+    faults.expect(not find(root, "preset-part:balance").property("on") and find(root, "preset-part:light").property("on"), "the parts as they start: all but the white balance")
+    click(view, find(root, "preset-part:color"))
+    click(view, find(root, "preset-name"))
+    for letter in "Hard":
+        QTest.keyClick(view, letter)
+    QTest.keyClick(view, Qt.Key.Key_Return)
+    settle()
+    view.grabWindow()
+    faults.expect(kept.all == [{"name": "Hard", "parts": ["light", "curve", "mono", "detail", "lens", "grain"], "look": {"contrast": 30.0}}], f"saved as Hard without Color: {kept.all}")
+    # The same name again is refused, and said to be taken.
+    click(view, find(root, "preset-name"))
+    for letter in "Hard":
+        QTest.keyClick(view, letter)
+    settle()
+    view.grabWindow()
+    faults.expect(find(root, "preset-taken").isVisible(), "a name that is taken is not said to be")
+    QTest.keyClick(view, Qt.Key.Key_Return)
+    click(view, find(root, "preset-keep"))
+    faults.expect(len(kept.all) == 1, f"a second preset of the same name was saved: {[p['name'] for p in kept.all]}")
+    QTest.keyClick(view, "A", Qt.KeyboardModifier.ControlModifier)
+    QTest.keyClick(view, Qt.Key.Key_Backspace)
+    QTest.keyClick(view, Qt.Key.Key_Escape)
+    settle()
+    faults.expect(session.index == 0 and session.history.edit.get("contrast") == 30.0, "typing a name changed the photo")
+    tile = find(root, "preset:0")
+    faults.expect(tile is not None and tile.isVisible(), "the preset saved is not shown")
+    if tile is None:
+        ui.close_view(view)
+        return faults
+    # Its picture is the photo with the preset: with the photo's edit taken away it is the
+    # only thing left with contrast, so its darks are darker than the photo's.
+    session.resetAll()
+    settle()
+    wait(lambda: False, 200)
+    shot, area, small = view.grabWindow(), box(root.findChild(QObject, "photo")), box(tile)
+    photo_dark = shot.pixelColor(int(area.left() + 0.5 * area.width()), int(area.top() + 0.7 * area.height())).lightness()
+    tile_dark = shot.pixelColor(int(small.left() + 0.5 * small.width()), int(small.top() + 0.7 * (small.height() - 30))).lightness()
+    faults.expect(tile_dark < photo_dark - 6, f"the preset's picture is not the photo with its contrast: {tile_dark} against {photo_dark} in the darks")
+    # Its picture has the photo's shape, also when the photo is upright (it was stretched).
+    session.setEdit("turns", 1.0)
+    settle()
+    view.grabWindow()
+    small_ = next(i for i in items(find(root, "preset:0")) if "Pipeline" in i.metaObject().className())
+    faults.expect(abs(small_.width() / small_.height() - 320 / 480) < 0.02, f"an upright photo's preset picture is {small_.width():.0f} x {small_.height():.0f}, not 2 : 3")
+    session.undo()
+    settle()
+    view.grabWindow()
+    tile = find(root, "preset:0")
+    session.setEdits({"saturation": 60.0, "highlights": -20.0})
+    session.commitEdit()
+    at = session.history.at
+    click(view, tile)
+    faults.expect(session.history.edit == {"contrast": 30.0, "saturation": 60.0} and session.history.at == at + 1,
+                  f"a click on the preset gave {session.history.edit} in {session.history.at - at} steps (Color was not part of it)")
+    QTest.mouseMove(view, box(tile).center().toPoint(), 300)
+    settle()
+    view.grabWindow()
+    click(view, find(root, "preset-rename:0"))
+    QTest.keyClick(view, "A", Qt.KeyboardModifier.ControlModifier)
+    for letter in "Soft":
+        QTest.keyClick(view, letter)
+    QTest.keyClick(view, Qt.Key.Key_Return)
+    settle()
+    faults.expect(kept.all[0]["name"] == "Soft", f"renamed to Soft it is {kept.all[0]['name']!r}")
+    faults.extend(audit_layout(view))
+    QTest.mouseMove(view, box(find(root, "preset:0")).center().toPoint(), 300)
+    settle()
+    view.grabWindow()
+    click(view, find(root, "preset-delete:0"))
+    view.grabWindow()
+    faults.expect(find(root, "modal:confirm").isVisible() and len(kept.all) == 1, "deleting a preset does not ask first")
+    click(view, find(root, "confirm-yes"))
+    faults.expect(kept.all == [], "nor delete it when told to")
+    ui.close_view(view)
+    return faults
+
+
+def audit_lut() -> list[str]:
+    """LUTs installed in Photone and laid on a photo, with a real mouse, measured in the
+    picture: installing .cube files (one that is none costs a sentence, one that is there
+    already is not there twice), an installed one dragged into the photo's list is laid on
+    at the place it is let go (a mere press on it does nothing); one that changes nothing changes nothing, one of opposites and
+    one that swaps red and blue do exactly that, one after the other; Strength, the eye, the
+    bin, a drag to another place; one that is uninstalled changes nothing and says so; no
+    fifth; and the exported file is the picture on screen."""
+    from photone import lut
+    ui.Session.luts_home = Path(tempfile.mkdtemp(prefix="photone-luts-", dir=SHELF.name))
+    warnings.clear()
+    session = ui.Session([Path("first.arw")], load=chart)
+    view, root = opened(session, "lut")
+    faults = Faults()
+    folder = Path(tempfile.mkdtemp(prefix="photone-lut-", dir=SHELF.name))
+    same = lut.identity(9)
+    for name, table in (("Same", lut.identity(17)), ("Opposite", 1 - same), ("Swapped", same[..., ::-1])):
+        (folder / f"{name}.cube").write_text(lut.cube(table, name), "utf-8")
+    (folder / "Broken.cube").write_text("LUT_3D_SIZE 4\n0 0 0\n", "utf-8")
+    area = box(root.findChild(QObject, "photo"))
+    spots = [QPoint(int(area.left() + u * area.width()), int(area.top() + v * area.height()))
+             for u in (0.1, 0.3, 0.5, 0.7, 0.9) for v in (0.15, 0.4, 0.65, 0.92)]
+
+    def seen() -> np.ndarray:
+        settle()
+        wait(lambda: False, 300)  # (the LUTs' picture is fetched anew when their list is another)
+        view.grabWindow()
+        wait(lambda: False, 100)
+        shot = view.grabWindow()
+        return np.array([shot.pixelColor(spot).getRgb()[:3] for spot in spots], int)
+
+    def names() -> list[str]:
+        return [one["name"] + (" off" if one.get("off") else "") for one in session.history.edit.get("luts", [])]
+
+    def shelf_row(name: str):
+        view.grabWindow()
+        return find(root, f"lut-shelf:{[one['name'] for one in session.lutsInstalled].index(name)}")
+
+    def lay(name: str, place: int | None = None) -> None:
+        """Drag that installed LUT into the photo's list: to that place, or to its end."""
+        row, into = box(shelf_row(name)), box(find(root, "lut-list"))
+        count = len(session.history.edit.get("luts", []))
+        y = into.top() + 4 + (count if place is None else place) * 28 + (2 if place is None else 0)
+        to = QPoint(int(into.center().x()), int(min(y, into.bottom() - 3)))
+        drag(view, row.center().toPoint(), to - row.center().toPoint())
+        view.grabWindow()
+
+    def over(item) -> None:  # the pointer on a row: its bin is there
+        QTest.mouseMove(view, box(item).center().toPoint(), 300)
+        settle()
+        view.grabWindow()
+
+    plain_ = seen()
+    inside = ((plain_ > 6) & (plain_ < 249)).all(axis=1)  # (not cut off by the screen's own range)
+    faults.expect(inside.sum() >= 8 and session.lutsInstalled == [], f"(only {inside.sum()} spots can be compared, or LUTs are installed already)")
+    session.installLuts([str(folder / f"{name}.cube") for name in ("Same", "Opposite", "Broken", "Swapped")])
+    faults.expect([one["name"] for one in session.lutsInstalled] == ["Opposite", "Same", "Swapped"] and "Broken.cube cannot be used as a LUT" in session.error
+                  and names() == [], f"installed: {[one['name'] for one in session.lutsInstalled]}, said {session.error!r}, on the photo {names()}")
+    # The same table again, in a file of another name and written otherwise: not twice.
+    (folder / "Copy of it.cube").write_text("# a copy\r\n" + lut.cube(1 - same, "Renamed").replace("\n", "\r\n"), "utf-8")
+    session.installLuts([str(folder / "Copy of it.cube"), str(folder / "Same.cube")])
+    faults.expect(len(session.lutsInstalled) == 3 and "Copy of it.cube is installed already, as “Opposite”" in session.error and "Same.cube is installed already" in session.error
+                  and len(list(ui.Session.luts_home.glob("*.cube"))) == 3, f"a LUT installed twice: {[one['name'] for one in session.lutsInstalled]}, said {session.error!r}")
+    session.say("")
+    steps = session.steps
+    click(view, shelf_row("Same"))
+    faults.expect(names() == [] and session.steps == steps, f"a mere press on an installed LUT laid it on: {names()}")
+    row = box(shelf_row("Same"))
+    drag(view, row.center().toPoint(), QPoint(0, 60))
+    faults.expect(names() == [] and not find(root, "lut-carried").isVisible(), f"an installed LUT let go beside the photo's list: {names()}")
+    lay("Same")
+    faults.expect(names() == ["Same"] and session.steps == steps + 1 and find(root, "lut-item:0") is not None and not find(root, "lut-carried").isVisible(),
+                  f"an installed LUT dragged into the photo's list: {names()} in {session.steps - steps} steps")
+    off = np.abs(seen() - plain_)[inside].max()
+    faults.expect(off <= 1, f"a LUT that changes nothing changed the picture by up to {off} levels")
+    lay("Opposite")
+    turned = seen()
+    off = np.abs(turned - (255 - plain_))[inside].max()
+    faults.expect(names() == ["Same", "Opposite"] and off <= 2, f"a LUT of opposites after it: up to {off} levels from the opposite color")
+    slider = find(root, "slider:lut")
+    track = slider.findChild(QObject, "track")
+    drag(view, box(slider.findChild(QObject, "thumb")).center().toPoint(), QPoint(-round(0.5 * (track.width() - 12)), 0))
+    half = seen()
+    low, high = np.minimum(plain_, turned), np.maximum(plain_, turned)
+    much = session.history.edit["luts"][1]["strength"]
+    faults.expect(abs(much - 50) <= 1 and session.history.edit["luts"][0]["strength"] == 100 and ((half >= low - 1) & (half <= high + 1))[inside].all()
+                  and np.abs(half - turned)[inside].max() > 20, f"the chosen LUT at half strength ({much}): the picture is not between the two")
+    session.undo()
+    click(view, find(root, "lut-eye:1"))
+    faults.expect(names() == ["Same", "Opposite off"] and np.abs(seen() - plain_)[inside].max() <= 1, f"the eye does not switch a LUT off: {names()}")
+    click(view, find(root, "lut-eye:1"))
+    # While it is held over the list, the rows below its place stand a row lower: a gap for it.
+    row, into, shown_ = box(shelf_row("Swapped")), box(find(root, "lut-list")), []
+    over_second = QPoint(int(into.center().x()), int(into.top() + 4 + 28)) - row.center().toPoint()
+    moves(view, row.center().toPoint(), [over_second, over_second],
+          lambda: shown_.append((find(root, "lut-item:0").property("place"), find(root, "lut-item:1").property("place"), find(root, "lut-gap").isVisible())))
+    faults.expect(shown_ == [(0, 2, True)], f"held over the second place, the rows stand at {shown_} (the second should make room)")
+    faults.expect(names() == ["Same", "Swapped", "Opposite"] and not find(root, "lut-gap").isVisible() and find(root, "lut-item:2").property("place") == 2,
+                  f"let go between the first and the second, it is at {names()}")
+    session.moveLut(1, 2)
+    off = np.abs(seen() - (255 - plain_)[:, ::-1])[inside].max()
+    faults.expect(names() == ["Same", "Opposite", "Swapped"] and off <= 2, f"three LUTs one after the other: up to {off} levels from the opposite with red and blue swapped")
+    # Dragged to the top, it is the first; one step of undo.
+    # (And while it is dragged the two it passes stand a row lower, as they will.)
+    steps, row, shown_ = session.steps, box(find(root, "lut-item:2")), []
+    # (Dragged far past the top of the list, it stays in it: at the first row's place.)
+    up, into = QPoint(0, -int(6 * row.height())), box(find(root, "lut-list"))
+    moves(view, QPoint(int(row.left() + 0.5 * row.width()), int(row.center().y())), [up, up],
+          lambda: shown_.append((find(root, "lut-item:0").property("place"), find(root, "lut-item:1").property("place"),
+                                 round(box(find(root, "lut-item:2")).top() - into.top() - 4))))
+    view.grabWindow()
+    faults.expect(shown_ == [(1, 2, 0)] and [find(root, f"lut-item:{n}").property("place") for n in range(3)] == [0, 1, 2]
+                  and [round(box(find(root, f"lut-item:{n}")).top() - box(find(root, "lut-list")).top() - 4) for n in range(3)] == [0, 28, 56],
+                  f"a row dragged past the top: the others and it stood at {shown_} meanwhile (it should stop at the first place), and after it the rows are at {[find(root, f'lut-item:{n}').property('place') for n in range(3)]}")
+    faults.expect(names() == ["Swapped", "Same", "Opposite"] and session.steps == steps + 1, f"a LUT dragged from third to first place: {names()} in {session.steps - steps} steps")
+    row, shown_ = box(find(root, "lut-item:0")), []
+    down = QPoint(0, int(7 * row.height()))
+    moves(view, row.center().toPoint(), [down, down], lambda: shown_.append(round(box(find(root, "lut-item:0")).top() - into.top() - 4)))
+    faults.expect(shown_ == [56] and names() == ["Same", "Opposite", "Swapped"], f"a row dragged far past the bottom stood at {shown_} px (the last place is 56), then: {names()}")
+    session.undo()
+    settle()
+    view.grabWindow()
+    # The file is the picture on screen.
+    screen = shown_at_full_size(view, root)
+    out = Path(tempfile.mkdtemp(prefix="photone-lut-out-", dir=SHELF.name))
+    session.exporter.side = 256
+    session.exporter.start([str(p) for p in session.photos], {"kind": "png8", "quality": 92, "longest": 0, "folder": str(out)})
+    carry_out(view, session)
+    file = QImage(str(out / "first.png"))
+    if file.isNull():
+        faults.append(f"a photo with LUTs was not exported: {session.exporter.failures}")
+    else:
+        written = export.bytes_of(file).astype(int)
+        off = np.abs(written - screen).max() if written.shape == screen.shape else 999
+        faults.expect(off <= 1, f"the exported picture is not the one on screen with its LUTs: up to {off} levels off")
+    # Uninstalled (after a question), it changes nothing on the photo and its row says so.
+    over(shelf_row("Opposite"))
+    click(view, find(root, f"lut-uninstall:{[one['name'] for one in session.lutsInstalled].index('Opposite')}"))
+    view.grabWindow()
+    faults.expect(find(root, "modal:confirm").isVisible() and len(session.lutsInstalled) == 3, "uninstalling a LUT does not ask first")
+    click(view, find(root, "confirm-yes"))
+    off = np.abs(seen() - plain_[:, ::-1])[inside].max()
+    faults.expect([one["name"] for one in session.lutsInstalled] == ["Same", "Swapped"] and session.lutsOn[2]["lost"] and off <= 2 and names() == ["Swapped", "Same", "Opposite"],
+                  f"a LUT uninstalled: still laid on ({off} levels from the photo with red and blue swapped), or not marked as gone")
+    # Installed again from a file of another name, it is found again by the photo, under
+    # its new name: by its colors, and also where the photo names it as the first day's
+    # Photone did (by its file's text), as the owner's photos do.
+    (folder / "Negative.cube").write_text((folder / "Opposite.cube").read_text("utf-8"), "utf-8")
+    session.installLuts([str(folder / "Negative.cube")])
+    off = np.abs(seen() - (255 - plain_)[:, ::-1])[inside].max()
+    faults.expect(not session.lutsOn[2]["lost"] and session.lutsOn[2]["name"] == "Negative" and off <= 2,
+                  f"installed again as Negative: the photo's entry is {session.lutsOn[2]}, the picture {off} levels from what it was with it")
+    old = lut.written((folder / "Opposite.cube").read_text("utf-8"))
+    session.setEdit("luts", [{"id": old, "name": "Opposite of old", "size": 9, "strength": 100.0}])
+    off = np.abs(seen() - (255 - plain_))[inside].max()
+    faults.expect(old != session.lutsInstalled[0]["id"] and not session.lutsOn[0]["lost"] and session.lutsOn[0]["name"] == "Negative" and off <= 2,
+                  f"a LUT named as the first day named it: {session.lutsOn[0]}, the picture {off} levels from the opposite")
+    session.undo()
+    settle()
+    # The bin takes one off the photo; the fifth is refused.
+    over(find(root, "lut-item:2"))
+    click(view, find(root, "lut-delete:2"))
+    faults.expect(names() == ["Swapped", "Same"], f"the bin on the third row left {names()}")
+    for _ in range(3):
+        lay("Same", 0)
+    faults.expect(len(names()) == 5 and names()[0] == "Same", f"dragged to the top three times, a photo with two has {names()}")
+    # More than the four rows in sight: the wheel scrolls the list, which says there is more.
+    scroll, into = find(root, "lut-scroll"), box(find(root, "lut-list"))
+    faults.expect(scroll.property("contentHeight") == 5 * 28 and find(root, "luts-more").isVisible(), "five LUTs: the list does not say that there is more below")
+    QCoreApplication.sendEvent(view, QWheelEvent(QPointF(into.center()), QPointF(into.center()), QPoint(), QPoint(0, -120), Qt.MouseButton.NoButton,
+                                                 Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False))
+    wait(lambda: False, 300)
+    view.grabWindow()
+    faults.expect(scroll.property("contentY") > 10 and into.contains(box(find(root, "lut-item:4"))), f"the wheel over the list scrolled it by {scroll.property('contentY'):.0f} px")
+    # A scroll of the column that passes over the list is not caught by it; a moment later the
+    # wheel is the list's again. And a list with nothing to scroll leaves it to the column.
+    column = find(root, "tools-scroll")
+
+    def turn(at: QPointF) -> None:
+        QCoreApplication.sendEvent(view, QWheelEvent(at, at, QPoint(), QPoint(0, -120), Qt.MouseButton.NoButton,
+                                                     Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False))
+        wait(lambda: False, 150)
+
+    scroll.setProperty("contentY", 0)
+    column.setProperty("contentY", 0)
+    wait(lambda: False, 500)
+    view.grabWindow()
+    faults.expect(column.property("contentHeight") > column.height() + 40, "(the column has nothing to scroll: the window is too high for this)")
+    turn(QPointF(box(find(root, "panel:tone")).center()))  # (on the column itself)
+    was = column.property("contentY")
+    turn(QPointF(box(find(root, "lut-list")).center()))
+    faults.expect(was > 10 and column.property("contentY") > was + 10 and scroll.property("contentY") == 0,
+                  f"a scroll of the column passing over the LUT list: the column went {was:.0f} to {column.property('contentY'):.0f}, the list to {scroll.property('contentY'):.0f}")
+    wait(lambda: False, 600)
+    was = column.property("contentY")
+    turn(QPointF(box(find(root, "lut-list")).center()))
+    faults.expect(scroll.property("contentY") > 10 and column.property("contentY") == was, "a moment later the wheel over the list does not scroll the list alone")
+    column.setProperty("contentY", 0)
+    wait(lambda: False, 600)
+    view.grabWindow()
+    turn(QPointF(box(find(root, "lut-installed")).center()))  # (three installed, room for five: nothing to scroll)
+    faults.expect(column.property("contentY") > 10, "over a list with nothing to scroll the wheel does not scroll the column")
+    column.setProperty("contentY", 0)
+    bring(root, "panel:lut")
+    wait(lambda: False, 500)
+    into = box(find(root, "lut-list"))
+    # Held at the foot of the box, a dragged row has the list scroll on, and can be let go at the end.
+    scroll.setProperty("contentY", 0)
+    settle()
+    view.grabWindow()
+    top = box(find(root, "lut-item:0"))
+    foot = QPoint(0, int(into.bottom() - 8 - top.center().y()))
+    moves(view, top.center().toPoint(), [foot, foot], lambda: wait(lambda: scroll.property("contentY") >= 27, 2000))
+    faults.expect(names() == ["Same", "Same", "Swapped", "Same", "Same"], f"the first row dragged to the box's foot and held there: {names()} (it should be the last of five)")
+    session.undo()
+    # Sixteen at most.
+    while session.addLut(session.lutsInstalled[0]["id"]) >= 0:
+        pass
+    faults.expect(len(names()) == edit.LUTS == 16 and "16 LUTs" in session.error, f"a seventeenth LUT: {len(names())} on the photo, said {session.error!r}")
+    lay("Same", 0)
+    faults.expect(len(names()) == 16, "an installed LUT can be dragged onto a photo that has sixteen")
+    # A .cube dropped on the photo is installed and laid on.
+    session.setEdit("luts", [])
+    (folder / "Dropped.cube").write_text(lut.cube(same[..., [1, 2, 0]], "Dropped"), "utf-8")
+    session.open([str(folder / "Dropped.cube")])
+    faults.expect(names() == ["Dropped"] and "Dropped" in [one["name"] for one in session.lutsInstalled] and session.index == 0,
+                  f"a .cube dropped on the photo: on it {names()}, installed {[one['name'] for one in session.lutsInstalled]}")
+    faults.extend(audit_layout(view))
+    faults.extend(f"the interface warned: {said}" for said in warnings if "lut" in said.lower())
+    ui.close_view(view)
+    ui.Session.luts_home = Path(SHELF.name) / "luts"
+    return faults
+
+
+def audit_table() -> list[str]:
+    """A look written out as a .cube file: of an untouched photo it is the table that changes
+    nothing; and brought in again on the photo without its edit, it shows the picture the
+    edit showed (a finished picture: every setting; a raw file: what comes after its develop)."""
+    from photone import lut
+    faults = Faults()
+    folder = Path(tempfile.mkdtemp(prefix="photone-table-", dir=SHELF.name))
+
+    def written(view, session, name: str) -> np.ndarray | None:
+        session.exporter.side = 1024
+        session.exporter.startTable(str(folder / name))
+        carry_out(view, session)
+        wait(lambda: not session.exporter.running, 8000)
+        file = folder / f"{name}.cube"
+        faults.expect(file.exists() and not session.exporter.failures, f"{name}.cube was not written: {session.exporter.failures}")
+        return lut.parse(file.read_text("utf-8")) if file.exists() else None
+
+    for kind, load, look in (("a finished picture", picture, {"exposure": 0.4, "contrast": 20.0, "saturation": 70.0, "curve": LIFT}),
+                             ("a raw file", chart, {"curve": LIFT, "saturation": 60.0, "eq": [{"hue": 140, "gain": 160, "width": 60}],
+                                                    "pins": [{"from": [0.1, 0.0], "to": [0.1, 0.06], "range": 0.1}]})):
+        session = ui.Session([Path("first.arw")], load=load)
+        view, root = opened(session, "")
+        area = box(root.findChild(QObject, "photo"))
+        spots = [QPoint(int(area.left() + u * area.width()), int(area.top() + v * area.height()))
+                 for u in (0.1, 0.3, 0.5, 0.7, 0.9) for v in (0.15, 0.4, 0.65, 0.92)]
+
+        def seen(view=view, spots=spots) -> np.ndarray:
+            wait(lambda: False, 150)
+            shot = view.grabWindow()
+            return np.array([shot.pixelColor(spot).getRgb()[:3] for spot in spots], int)
+
+        if load is picture:
+            same = written(view, session, "nothing")
+            if same is not None:
+                off = np.abs(same - lut.identity(len(same))).max()
+                # (To 0.008: a small red beside a full green and blue is kept that finely by the half
+                # floats a picture is handed over in; on average the table is 0.0002 off.)
+                faults.expect(len(same) == 65 and off < 0.008 and np.abs(same - lut.identity(len(same))).mean() < 0.0005, f"the table of an untouched photo is not the one that changes nothing: {len(same)} points, up to {off:.4f} off")
+        untouched = seen()
+        session.setEdits({**look, "grain": 60.0, "crop": [0.0, 0.0, 1.0, 1.0], "masks": [OVAL]})
+        session.commitEdit()
+        session.setEdit("grain", 0.0)  # (seen without the grain, which no table holds)
+        want = seen()
+        session.setEdit("grain", 60.0)
+        name = "look-" + kind.split()[-1]
+        if written(view, session, name) is not None:
+            session.resetAll()
+            session.importLut(str(folder / f"{name}.cube"))
+            settle()
+            wait(lambda: stage(root).property("lut") is not None, 3000)
+            view.grabWindow()
+            wait(lambda: False, 300)
+            got = seen()
+            # (Where the photo itself is a color the screen can show: a table holds those and
+            # no others, so a color beyond them is not what the look made of it.)
+            inside = ((want > 6) & (want < 249) & (untouched > 6) & (untouched < 249)).all(axis=1)
+            off = np.abs(got - want)[inside].max()
+            faults.expect(inside.sum() >= 8 and off <= 3, f"{kind}: its look as a table, brought in again, is up to {off} levels from the look itself ({inside.sum()} spots)")
+        ui.close_view(view)
     return faults
 
 
@@ -3112,7 +3717,7 @@ def fourth_crop(view, root, session, faults) -> None:
 
 def fourth_rest(view, root, session, shown, faults) -> None:
     """A checkpoint renamed, a folder's menu, the zoom gliding, the foot."""
-    click(view, find(root, "checkpoint-save-wide"))
+    click(view, find(root, "checkpoint-save"))
     view.grabWindow()
     number = session.checkpoints[0]["id"]
     QTest.mouseMove(view, box(find(root, f"checkpoint:{number}")).center().toPoint(), 300)
@@ -3167,73 +3772,588 @@ def fourth_rest(view, root, session, shown, faults) -> None:
 def audit_fourth() -> list[str]:
     """The owner's fourth list from use (M18), on the Edit screen as the program starts with
     it: under real clicks and drags."""
-    was = os.environ.get("PHOTONE_TRIAL")
-    os.environ["PHOTONE_TRIAL"] = ""
-    try:
-        shown = shelf("fourth")
-        session = ui.Session([], load=chart)
-        view = ui.make_view(session, shown)
-        session.surface_known(False)
-        root = view.rootObject()
-        root.setSize(view.size())
-        shown.show(shown.places["folders"][0]["id"])
-        session.openAt(shown.paths(), 0)
-        call(root, "show", "edit")
-        wait(lambda: root.property("photoReady"))
+    shown = shelf("fourth")
+    session = ui.Session([], load=chart)
+    view = ui.make_view(session, shown)
+    session.surface_known(False)
+    root = view.rootObject()
+    root.setSize(view.size())
+    shown.show(shown.places["folders"][0]["id"])
+    session.openAt(shown.paths(), 0)
+    call(root, "show", "edit")
+    wait(lambda: root.property("photoReady"))
+    settle()
+    view.grabWindow()
+    settle()
+    faults = Faults()
+    faults.extend(audit_layout(view))
+    faults.expect(find(root, "slider:exposure").isVisible() and not find(root, "balance-pad").isVisible() and not find(root, "wheel").isVisible(),
+                  "at start, Light is not the one card open")
+    # Over a card's head the pointer is a hand, over a panel's edge two arrows: nothing
+    # laid over the window takes the pointer's shape from what is under it.
+    for name, by, shape in (("panel:tone", QPoint(80, 14), Qt.CursorShape.PointingHandCursor),
+                            ("left-edge", QPoint(3, 200), Qt.CursorShape.SizeHorCursor)):
+        QTest.mouseMove(view, box(find(root, name)).topLeft().toPoint() + by, 100)
         settle()
-        view.grabWindow()
+        faults.expect(view.cursor().shape() == shape, f"over {name} the pointer is {view.cursor().shape()}, not {shape}")
+    root.setProperty("unfolded", {"tone": True, "wheel": True})
+    settle()
+    view.grabWindow()
+    fourth_drags(view, root, session, faults)
+    fourth_masks(view, root, session, faults)
+    fourth_crop(view, root, session, faults)
+    fourth_rest(view, root, session, shown, faults)
+    ui.close_view(view)
+    return faults
+
+
+def audit_mono() -> list[str]:
+    """Black and white under real clicks and keys: the switch puts its card in the color
+    cards' place and M brings them back, the color grade untouched; the picture is gray, and
+    as light at every spot as edit.mono_at says; a look is its points and is lit while the EQ
+    is exactly it; a drag on the line makes a point; Reset is the look a photo starts with."""
+    session = ui.Session([Path("first.arw")], load=chart)
+    view, root = opened(session, "saturation")
+    faults = Faults()
+    counted(view, session)
+    grade = {"saturation": 140.0, "pins": [{"from": [0.1, 0.0], "to": [0.1, 0.06]}]}
+    session.setEdits(grade)
+    session.commitEdit()
+    kept = dict(session.history.edit)
+    area = box(root.findChild(QObject, "photo"))
+
+    def there(*names) -> list[str]:
+        return [n for n in names if find(root, n).isVisible()]
+
+    def compared(when: str) -> None:
+        shot, tried = view.grabWindow(), 0
+        for u, v in ((0.3, 0.7), (0.62, 0.55), (0.12, 0.45), (0.85, 0.3), (0.5, 0.75), (0.2, 0.2), (0.75, 0.6)):
+            seen = shot.pixelColor(int(area.left() + u * area.width()), int(area.top() + v * area.height()))
+            if not all(4 < c < 251 for c in seen.getRgb()[:3]):
+                continue  # cut off by the screen's own range: nothing to compare
+            a, b, light = session.colorAt(u, v)
+            want = edit.mono_at(session.bw, [light, a, b])[0]
+            tried += 1
+            faults.expect(max(seen.getRgb()[:3]) - min(seen.getRgb()[:3]) <= 2 and abs(oklab_of(seen)[0] - want) < 0.02,
+                          f"{when}, at {u}, {v} the photo shows {seen.name()}, not a gray of lightness {want:.3f}")
+        faults.expect(tried >= 3, f"{when}, too few spots of the chart could be compared ({tried})")
+
+    faults.expect(there("panel:saturation", "panel:eq", "panel:chroma", "wheel-block", "panel:mono") == ["panel:saturation", "panel:eq", "panel:chroma", "wheel-block"],
+                  f"a photo in color shows {there('panel:saturation', 'panel:eq', 'panel:chroma', 'wheel-block', 'panel:mono')}")
+    bring(root, "treatment")
+    click(view, find(root, "treatment:mono"))
+    view.grabWindow()
+    faults.expect(session.history.edit == {**kept, "mono": True}, f"Black & white changed more than the switch: {session.history.edit}")
+    faults.expect(there("panel:saturation", "panel:eq", "panel:chroma", "wheel-block", "panel:mono") == ["panel:mono"] and find(root, "bw-plot").isVisible(),
+                  f"in black and white the column shows {there('panel:saturation', 'panel:eq', 'panel:chroma', 'wheel-block', 'panel:mono')}")
+    faults.expect(find(root, "film:panchromatic").property("on") and session.bw == edit.FILMS["panchromatic"], "a photo does not start black and white as Panchromatic")
+    compared("as Panchromatic")
+    bring(root, "panel:mono")
+    click(view, find(root, "film:red"))
+    faults.expect(session.bw == edit.FILMS["red"] and find(root, "film:red").property("on") and not find(root, "film:panchromatic").property("on"),
+                  f"Red filter gave {session.bw}")
+    compared("with the red filter")
+    plot = box(find(root, "bw-plot"))
+    w, h = plot.width() - 16, plot.height() - 16
+    steps = session.steps
+    drag(view, QPoint(round(plot.left() + 8 + 330 / 360 * w), round(plot.top() + 8 + 0.5 * h)), QPoint(0, -round(0.25 * h)))
+    made = session.bw[-1] if session.bw else {}
+    faults.expect(len(session.bw) == len(edit.FILMS["red"]) + 1 and abs(made["hue"] - 330) < 2 and abs(made["gain"] - 20) < 1.5 and session.steps == steps + 1,
+                  f"dragging the line up a quarter at 330 degrees gave {made} in {session.steps - steps} steps")
+    faults.expect(not any(find(root, f"film:{name}").property("on") for name in edit.FILMS), "a look changed by hand is still lit")
+    compared("with a point of my own")
+    click(view, find(root, "reset:mono"))
+    faults.expect(session.history.edit == {**kept, "mono": True}, f"Reset on the card left {session.history.edit}")
+    QCoreApplication.sendEvent(root, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_M, Qt.KeyboardModifier.NoModifier))
+    settle()
+    view.grabWindow()
+    faults.expect(session.history.edit == kept and find(root, "panel:saturation").isVisible() and not find(root, "panel:mono").isVisible(),
+                  f"M does not bring the color grade back as it was: {session.history.edit}")
+    seen = view.grabWindow().pixelColor(int(area.left() + 0.3 * area.width()), int(area.top() + 0.7 * area.height()))
+    faults.expect(max(seen.getRgb()[:3]) - min(seen.getRgb()[:3]) > 20, f"back in color the photo is still gray: {seen.name()}")
+    # An export of it is gray as well: the file is made by the same shader.
+    session.setEdits({"mono": True, "bw": edit.FILMS["orange"]})
+    session.commitEdit()
+    settle()
+    out = Path(tempfile.mkdtemp(prefix="photone-mono-", dir=SHELF.name))
+    session.exporter.side = 256
+    session.exporter.start([str(p) for p in session.photos], {"kind": "png8", "quality": 92, "longest": 0, "folder": str(out)})
+    carry_out(view, session)
+    file = QImage(str(out / "first.png")).convertToFormat(QImage.Format.Format_RGB888)
+    if file.isNull():
+        faults.append(f"a black and white photo was not exported: {session.exporter.failures}")
+    else:
+        levels = np.frombuffer(file.constBits(), np.uint8)[:file.sizeInBytes()].reshape(file.height(), file.bytesPerLine())[:, :file.width() * 3].reshape(file.height(), -1, 3).astype(int)
+        spread = (levels.max(axis=2) - levels.min(axis=2)).max()
+        faults.expect(spread <= 1 and levels.std() > 20, f"the exported black and white photo has colors: up to {spread} levels between red, green and blue")
+    # Inside a mask too, whose cards for colors are not there.
+    session.setEdits({"mono": True, "masks": [OVAL]})
+    session.commitEdit()
+    show(root, "masks")
+    click(view, find(root, "mask-item:1"))
+    view.grabWindow()
+    faults.expect(there("panel:local-light", "panel:local-saturation", "panel:local-eq", "panel:local-chroma", "wheel-block") == ["panel:local-light"],
+                  f"a mask of a black and white photo shows {there('panel:local-light', 'panel:local-saturation', 'panel:local-eq', 'panel:local-chroma', 'wheel-block')}")
+    session.setMaskEdit(1, "exposure", 1.0)
+    session.commitEdit()
+    QTest.mouseMove(view, QPoint(30, 30))
+    wait(lambda: False, 250)
+    inside = view.grabWindow().pixelColor(int(area.left() + 0.6 * area.width()), int(area.top() + 0.42 * area.height()))
+    faults.expect(max(inside.getRgb()[:3]) - min(inside.getRgb()[:3]) <= 2, f"inside a mask with its own Exposure the photo is not gray: {inside.name()}")
+    faults.extend(audit_layout(view))
+    ui.close_view(view)
+    return faults
+
+
+def audit_grain() -> list[str]:
+    """Film grain, measured in the picture: there in the middle grays and, as on a print, not
+    at black or white; the same pattern when the photo is moved, and in an exported file;
+    weaker where a pixel of the screen covers several grains; colored only when asked, and
+    never in a black and white photo."""
+    session = ui.Session([Path("first.arw")], load=chart)
+    view, root = opened(session, "")
+    faults = Faults()
+
+    def wedge(step: int) -> np.ndarray:  # the levels of that step of the gray wedge, as far as it is in sight
+        area, room = box(root.findChild(QObject, "photo")), box(stage(root)).adjusted(4, 4, -4, -60)
+        part = QRectF(area.left() + (step + 0.2) / 8 * area.width(), area.top() + 0.87 * area.height(),
+                      0.6 / 8 * area.width(), 0.1 * area.height()).intersected(room).toRect()
+        return export.bytes_of(view.grabWindow().copy(part)).astype(float)
+
+    # (The chart is 480 px across and fitted at 170 %: at size 4 there are 1000 grains across
+    # it, about one to a pixel of the screen, so each is seen for what it is.)
+    faults.expect(wedge(3).std() < 0.6, f"without grain a gray of the wedge is not even: {wedge(3).std():.2f} levels")
+    session.setEdits({"grain": 100.0, "grainSize": 4.0, "grainCurve": edit.RESPONSES["even"]})
+    session.commitEdit()
+    settle()
+    even = wedge(3)
+    faults.expect(even.std() > 4 and abs(even.mean() - wedge(3).mean()) < 0.01 and (even.max(axis=2) - even.min(axis=2)).max() <= 2,
+                  f"grain of 100 on a middle gray: {even.std():.2f} levels of it, up to {(even.max(axis=2) - even.min(axis=2)).max():.0f} between red, green and blue")
+    # The pattern is the picture's: seen closely and then moved 24 px across the screen, the
+    # same part of the photo has the same grain.
+    area = box(root.findChild(QObject, "photo"))
+    call(stage(root), "zoomTo", 3.0, area.left() + 3.5 / 8 * area.width(), area.top() + 0.92 * area.height())
+    settle()
+    near = wedge(3)
+    call(stage(root), "panBy", 24.0, 0.0)
+    settle()
+    moved = wedge(3)
+    same = np.abs(moved - near).max() if moved.shape == near.shape else 999
+    faults.expect(same <= 1 and near.std() > 4, f"the photo moved by 24 px, its grain is another: up to {same} levels")
+    call(stage(root), "fit")
+    settle()
+    # A response: as on a print, none at black and at white.
+    session.setEdit("grainCurve", edit.RESPONSES["print"])
+    session.commitEdit()
+    found = {}
+    for step in (0, 3, 7):
+        found[step] = round(float(wedge(step).std()), 2)
+    faults.expect(found[0] < 0.8 and found[7] < 0.8 and found[3] > 3, f"with the Print response the grain is {found} levels at black, a middle gray and white")
+    # Finer than the screen's pixels it is their average: weaker, not a coarser pattern.
+    session.setEdits({"grainSize": 0.4, "grainCurve": edit.RESPONSES["even"]})
+    settle()
+    faults.expect(0.2 < wedge(3).std() < 0.3 * even.std(), f"twelve grains to a pixel of the screen: {wedge(3).std():.2f} levels, {even.std():.2f} with each grain seen")
+    # Colored when asked; never in black and white.
+    session.setEdits({"grainSize": 4.0, "grainColor": 100.0})
+    settle()
+    tinted = wedge(3)
+    session.setEdit("mono", True)
+    settle()
+    gray = wedge(3)
+    faults.expect((tinted.max(axis=2) - tinted.min(axis=2)).max() > 6 and (gray.max(axis=2) - gray.min(axis=2)).max() <= 2 and gray.std() > 4,
+                  f"colored grain: up to {(tinted.max(axis=2) - tinted.min(axis=2)).max():.0f} levels between red, green and blue; in black and white {(gray.max(axis=2) - gray.min(axis=2)).max():.0f}")
+    # And the file has the grain the screen shows at 100 %.
+    session.setEdits({"mono": False, "grainColor": 30.0})
+    session.commitEdit()
+    settle()
+    screen = shown_at_full_size(view, root)
+    out = Path(tempfile.mkdtemp(prefix="photone-grain-", dir=SHELF.name))
+    session.exporter.side = 256
+    session.exporter.start([str(p) for p in session.photos], {"kind": "png8", "quality": 92, "longest": 0, "folder": str(out)})
+    carry_out(view, session)
+    file = QImage(str(out / "first.png"))
+    if file.isNull():
+        faults.append(f"a photo with grain was not exported: {session.exporter.failures}")
+    else:
+        written = export.bytes_of(file).astype(int)
+        # (But the picture's outermost row and column, where a pixel has no neighbor to
+        # tell how many grains it covers: there the two differ.)
+        off = np.abs(written - screen)[1:-1, 1:-1].max() if written.shape == screen.shape else 999
+        faults.expect(off <= 1 and written[-40:-10, 180:220].std() > 2, f"the exported grain is not the grain on screen: up to {off} levels off")
+    # The card: a character is an amount, a size and a roughness, lit while the edit is
+    # exactly it; a response is the curve's points; no Color for a black and white photo; and
+    # the loupe shows the photo at 100 %, which a drag moves.
+    session.resetAll()
+    show(root, "grain")
+    click(view, find(root, "grain-character:bold"))
+    faults.expect(session.history.edit == edit.clean(edit.CHARACTERS["bold"]) and find(root, "grain-character:bold").property("on")
+                  and not find(root, "grain-character:classic").property("on"), f"Bold gave {session.history.edit}")
+    slider = find(root, "slider:grain")
+    drag(view, box(slider.findChild(QObject, "thumb")).center().toPoint(), QPoint(-30, 0))
+    faults.expect(session.edit["grain"] < 55 and not find(root, "grain-character:bold").property("on"), "an amount changed by hand leaves Bold lit")
+    session.undo()
+    bring(root, "grain-response:negative")
+    click(view, find(root, "grain-response:negative"))
+    faults.expect(session.grainCurve == edit.RESPONSES["negative"] and find(root, "grain-response:negative").property("on"), f"Shadows gave {session.grainCurve}")
+    session.undo()
+    faults.expect(session.grainCurve == edit.RESPONSES["print"] and session.edit["grain"] == 55, "a response chosen is more than one step of undo")
+    plot = box(find(root, "grainCurve-plot"))
+    drag(view, QPoint(round(plot.left() + 8 + 0.25 * (plot.width() - 16)), round(plot.top() + 8 + 0.5 * (plot.height() - 16))), QPoint(0, 30))
+    faults.expect(len(session.grainCurve) == 4 and not any(find(root, f"grain-response:{name}").property("on") for name in edit.RESPONSES),
+                  f"a drag on the response curve gave {session.grainCurve}")
+    bring(root, "panel:grain")
+    loupe, shown_ = find(root, "grain-loupe"), find(root, "grain-loupe-photo")
+    faults.expect(shown_.isVisible() and shown_.width() == session.fullWidth and shown_.height() == session.fullHeight,
+                  f"the loupe shows the photo {shown_.width():.0f} px across, not its own {session.fullWidth}")
+    was = box(shown_).topLeft()
+    drag(view, box(loupe).center().toPoint(), QPoint(-10, -25))  # (the chart is hardly wider than the loupe: it stops at the photo's edge)
+    now = box(shown_).topLeft()
+    faults.expect(abs(now.x() - was.x() + 10) <= 1 and abs(now.y() - was.y() + 25) <= 1, f"a drag of -10, -25 px in the loupe moved the photo by {now.x() - was.x():.0f}, {now.y() - was.y():.0f}")
+    drag(view, box(loupe).center().toPoint(), QPoint(-300, 0))
+    faults.expect(box(shown_).right() >= box(loupe).right() - 1, "dragged far, the loupe shows what is beside the photo")
+    faults.expect(find(root, "slider:grainColor").isVisible(), "no Color for a photo in color")
+    session.setEdit("mono", True)
+    settle()
+    view.grabWindow()
+    faults.expect(find(root, "panel:grain").isVisible() and not find(root, "slider:grainColor").isVisible(), "a black and white photo's grain card: not there, or with Color")
+    click(view, find(root, "reset:grain"))
+    faults.expect(session.history.edit == {"mono": True}, f"Reset on the card left {session.history.edit}")
+    faults.extend(audit_layout(view))
+    ui.close_view(view)
+    return faults
+
+
+def audit_detail() -> list[str]:
+    """Sharpening and noise reduction, measured in the picture at 100 %: noise reduction for
+    lightness makes a noisy gray even and leaves an edge where it is, the one for color takes
+    the color out of the noise and leaves its lightness; sharpening makes an edge steeper
+    and, with Masking, leaves noise alone; seen from far none of it is done; and the file is
+    the picture on screen."""
+    session = ui.Session([Path("first.png")], load=noisy)
+    view, root = opened(session, "")
+    faults = Faults()
+    call(stage(root), "actual")
+    settle()
+
+    def part(first: int, last: int) -> np.ndarray:  # those columns of the photo, rows 40 to 280, as levels
+        area = box(root.findChild(QObject, "photo"))
+        wait(lambda: False, 60)
+        grab = view.grabWindow().copy(int(area.left()) + first, int(area.top()) + 40, last - first, 240)
+        return export.bytes_of(grab).astype(float)
+
+    def rise() -> float:  # how many pixels the noisy edge takes from a tenth to nine tenths of its step
+        across = part(200, 280).mean(axis=(0, 2))
+        low, high = across[:20].mean(), across[-20:].mean()
+        return float(((across > low + 0.1 * (high - low)) & (across < low + 0.9 * (high - low))).sum())
+
+    def set_(**values) -> None:
+        # (From nothing of it: a photo starts with a little of each, the owner's choice.)
+        session.setEdits({"sharpen": 0.0, "sharpenRadius": 1.0, "sharpenMask": 0.0, "denoise": 0.0, "denoiseColor": 0.0, **values})
         settle()
-        faults = Faults()
-        faults.extend(audit_layout(view))
-        faults.expect(find(root, "slider:exposure").isVisible() and find(root, "balance-pad").isVisible() and not find(root, "wheel").isVisible(),
-                      "at start, Light and White balance are not the two cards open")
-        # Over a card's head the pointer is a hand, over a panel's edge two arrows: nothing
-        # laid over the window takes the pointer's shape from what is under it.
-        for name, by, shape in (("panel:tone", QPoint(80, 14), Qt.CursorShape.PointingHandCursor),
-                                ("left-edge", QPoint(3, 200), Qt.CursorShape.SizeHorCursor)):
-            QTest.mouseMove(view, box(find(root, name)).topLeft().toPoint() + by, 100)
-            settle()
-            faults.expect(view.cursor().shape() == shape, f"over {name} the pointer is {view.cursor().shape()}, not {shape}")
-        root.setProperty("unfolded", {"tone": True, "wheel": True})
+
+    faults.expect(session.uniforms["sharpen"] == 0.2 and session.uniforms["denoise"] > 0 and session.uniforms["denoiseColor"] > 0 and session.history.edit == {},
+                  "a photo does not start with a little sharpening and noise reduction")
+    set_()
+    gray = part(20, 140)
+    light, tint, edge = gray.mean(axis=2).std(), (gray[..., 0] - gray[..., 1]).std(), rise()
+    faults.expect(light > 3 and tint > 4 and edge <= 3, f"(the photo to try it on: noise of {light:.1f} levels, {tint:.1f} of color, an edge of {edge:.0f} px)")
+    set_(denoise=100.0)
+    calm = part(20, 140)
+    faults.expect(calm.mean(axis=2).std() < 0.5 * light and abs(calm.mean() - gray.mean()) < 1 and rise() <= edge + 1,
+                  f"noise reduction at 100: the gray's noise went from {light:.2f} to {calm.mean(axis=2).std():.2f} levels, the edge from {edge:.0f} to {rise():.0f} px")
+    set_(denoiseColor=100.0)
+    plain_ = part(20, 140)
+    faults.expect((plain_[..., 0] - plain_[..., 1]).std() < 0.4 * tint and plain_.mean(axis=2).std() > 0.8 * light and rise() <= edge + 1,
+                  f"color noise reduction at 100: the noise's color went from {tint:.2f} to {(plain_[..., 0] - plain_[..., 1]).std():.2f} levels, its lightness from {light:.2f} to {plain_.mean(axis=2).std():.2f}")
+    # Sharpening, on the clean edge: steeper, and lighter than the light side just beyond it.
+    set_()
+    soft = part(360, 440).mean(axis=(0, 2))
+    set_(sharpen=100.0)
+    crisp = part(360, 440).mean(axis=(0, 2))
+    faults.expect(crisp.max() > soft.max() + 3 and crisp.min() < soft.min() - 1 and abs(crisp[:20].mean() - soft[:20].mean()) < 0.5,
+                  f"sharpening at 100: the edge goes from {soft.min():.0f}..{soft.max():.0f} to {crisp.min():.0f}..{crisp.max():.0f} levels")
+    rough = part(20, 140).mean(axis=2).std()
+    set_(sharpen=100.0, sharpenMask=100.0)
+    masked_ = part(20, 140).mean(axis=2).std()
+    kept = part(360, 440).mean(axis=(0, 2))
+    faults.expect(rough > 1.3 * light and masked_ < 1.15 * light and kept.max() > soft.max() + 3,
+                  f"sharpening makes the noise {rough:.2f} levels (from {light:.2f}); with Masking {masked_:.2f}, the edge still to {kept.max():.0f}")
+    # The file is the picture on screen.
+    set_(sharpen=60.0, denoise=50.0, denoiseColor=50.0)
+    session.commitEdit()
+    screen = shown_at_full_size(view, root)
+    out = Path(tempfile.mkdtemp(prefix="photone-detail-", dir=SHELF.name))
+    session.exporter.side = 256
+    session.exporter.start([str(p) for p in session.photos], {"kind": "png8", "quality": 92, "longest": 0, "folder": str(out)})
+    carry_out(view, session)
+    file = QImage(str(out / "first.png"))
+    if file.isNull():
+        faults.append(f"a sharpened photo was not exported: {session.exporter.failures}")
+    else:
+        written = export.bytes_of(file).astype(int)
+        off = np.abs(written - screen)[4:-4, 4:-4].max() if written.shape == screen.shape else 999
+        faults.expect(off <= 1, f"the exported picture is not the one on screen: up to {off} levels off")
+    # From far there is nothing of a pixel's size to see: nothing is done.
+    call(stage(root), "zoomTo", 0.4, box(stage(root)).center().x(), box(stage(root)).center().y())
+    settle()
+    area = box(root.findChild(QObject, "photo"))
+    small = lambda: export.bytes_of(view.grabWindow().copy(int(area.left()) + 8, int(area.top()) + 16, 48, 96)).astype(float)  # noqa: E731
+    with_ = small()
+    set_()
+    faults.expect(np.abs(small() - with_).max() <= 1, f"seen at 40 %, the picture differs by up to {np.abs(small() - with_).max():.0f} levels with and without")
+    ui.close_view(view)
+    return faults
+
+
+def audit_lens() -> list[str]:
+    """Lens corrections from a file's own figures, measured in the picture: vignetting makes
+    the corners as much lighter as the figures say and leaves the middle; distortion puts
+    each thing where the figures say, and no corner is left empty; chromatic aberration
+    moves red and blue apart from green by what they say; the switches of the card; a file
+    without figures has nothing to switch; and the file is the picture on screen."""
+    from photone import lens
+    session = ui.Session([Path("first.arw")], load=lensed)
+    view, root = opened(session, "lens")
+    faults = Faults()
+    area = box(root.findChild(QObject, "photo"))
+
+    def seen() -> np.ndarray:  # the photo as it is on screen, rows x columns x 3
         settle()
-        view.grabWindow()
-        fourth_drags(view, root, session, faults)
-        fourth_masks(view, root, session, faults)
-        fourth_crop(view, root, session, faults)
-        fourth_rest(view, root, session, shown, faults)
-        ui.close_view(view)
-        return faults
-    finally:
-        os.environ["PHOTONE_TRIAL"] = was if was is not None else "old"
+        wait(lambda: False, 80)
+        return export.bytes_of(view.grabWindow().copy(area.toRect())).astype(float)
+
+    def steps(shot: np.ndarray, channel: int = 1) -> list[float]:
+        """Where the gray wedge's steps begin, in pixels across the shot, for one color:
+        the places along a row near the foot where it gets lighter by a step."""
+        row = shot[int(0.93 * len(shot)) - 3:int(0.93 * len(shot)) + 3, :, channel].mean(axis=0)
+        rise = np.diff(row)
+        found, n = [], 1
+        while n < len(rise) - 1:
+            if rise[n] > 4:
+                last = n
+                while last + 1 < len(rise) and rise[last + 1] > 1:
+                    last += 1
+                weights = rise[n:last + 1]
+                found.append(float((np.arange(n, last + 1) * weights).sum() / weights.sum()) + 1)
+                n = last + 1
+            n += 1
+        return found
+
+    def where(table: list, x: float) -> float:
+        """Where a thing that is at `x` (0..1 across the stored picture, on the wedge's row)
+        is drawn: the place whose pixel reads the picture there."""
+        low, high = 0.0, 1.0
+        for _ in range(40):
+            at = (low + high) / 2
+            out = np.array([(at - 0.5) * 1.5, 0.93 - 0.5])
+            r = float(np.hypot(*out) / np.hypot(0.75, 0.5))
+            read = 0.5 + (at - 0.5) * lens._at_table(table, r)
+            low, high = (at, high) if read < x else (low, at)
+        return (low + high) / 2
+
+    # All three are on for a photo that says nothing else (the owner's choice); each is then
+    # tried alone, from all off.
+    faults.expect(session.lensHas == {"distortion": True, "color": True, "vignetting": True} and session.uniforms["lensOn"] == 1
+                  and all(find(root, f"lens:{name}").property("on") for name in ("distortion", "color", "vignetting")),
+                  f"a file with figures: {session.lensHas}; its corrections are not on from the start")
+    off = {"lensDistortion": False, "lensColor": False, "lensVignetting": False}
+    session.setEdits(off)
+    session.commitEdit()
+    plain_ = seen()
+    faults.expect(session.uniforms["lensOn"] == 0, "switched off, something is still done")
+    edges = steps(plain_)
+    # (Six of the wedge's seven steps: the last, to white, is too small a step to find.)
+    faults.expect(len(edges) == 6, f"(the wedge's steps are found at {edges})")
+    # Vignetting, by its switch: the corner lighter, the middle as it was.
+    click(view, find(root, "lens:vignetting"))
+    lit = seen()
+    high, wide = lit.shape[:2]
+    faults.expect(session.history.edit == {"lensDistortion": False, "lensColor": False} and np.abs(lit[high // 2 - 4:high // 2 + 4, wide // 2 - 4:wide // 2 + 4] - plain_[high // 2 - 4:high // 2 + 4, wide // 2 - 4:wide // 2 + 4]).max() <= 1,
+                  f"Vignetting: {session.history.edit}, or the picture's middle changed")
+    corner = lambda shot: shot[int(0.7 * high):int(0.76 * high), int(0.03 * wide):int(0.06 * wide)].mean()  # noqa: E731
+    faults.expect(corner(lit) > corner(plain_) * 1.1, f"Vignetting: a corner went from {corner(plain_):.1f} to {corner(lit):.1f} levels")
+    click(view, find(root, "lens:vignetting"))
+    # Distortion: each step of the wedge where the figures put it; no corner left empty.
+    click(view, find(root, "lens:distortion"))
+    bent = seen()
+    green = session.history.edit and edit.uniforms(session.history.edit, session._camera, True, shape=1.5)["lensGreen"]
+    want = [where(green, (n + 1) / 8) * wide for n in range(6)]
+    got = steps(bent)
+    off = max(abs(a - b) for a, b in zip(got, want, strict=False)) if len(got) == 6 else 999
+    faults.expect(off <= 1.5 and max(abs(a - b) for a, b in zip(got, edges, strict=False)) > 4,
+                  f"Distortion: the wedge's steps are at {[round(v) for v in got]}, the figures put them at {[round(v) for v in want]} (they were at {[round(v) for v in edges]})")
+    faults.expect(min(bent[2, 2].max(), bent[-3, -3].max(), bent[2, -3].max()) > 8, "Distortion leaves a corner of the frame empty")
+    click(view, find(root, "lens:distortion"))
+    # Chromatic aberration: red is read further out and blue further in than green, so on
+    # the right half a step is drawn further in for red and further out for blue.
+    click(view, find(root, "lens:color"))
+    fringed = seen()
+    red, blue, mid = steps(fringed, 0), steps(fringed, 2), steps(fringed, 1)
+    near = lambda found, x: min(found, key=lambda at: abs(at - x)) if found else 0.0  # noqa: E731
+    red, blue, mid = [[near(found, x) for x in edges] for found in (red, blue, mid)]
+    apart = red[-1] - blue[-1]
+    numbers = edit.uniforms(session.history.edit, session._camera, True, shape=1.5)
+    expect = (where(numbers["lensRed"], 6 / 8) - where(numbers["lensBlue"], 6 / 8)) * wide
+    faults.expect(len(mid) == 6 and abs(mid[-1] - edges[-1]) < 0.6 and abs(apart - expect) < 1.0 and abs(expect) > 2,
+                  f"Chromatic aberration: the last step's red and blue are {apart:.1f} px apart, the figures say {expect:.1f}; green moved {mid[-1] - edges[-1] if len(mid) == 6 else 0:.1f}")
+    # The file is the picture on screen, with all three.
+    session.resetAll()
+    faults.expect(session.history.edit == {} and session.uniforms["lensOn"] == 1, "Reset all does not bring the three corrections back on")
+    # Seen from close, the photo's pixels are squares also with the corrections (and the
+    # sharpening and noise reduction a photo starts with) on: along a row, four pixels of
+    # the screen to one of the photo, the color changes every fourth pixel and not between.
+    centre = box(stage(root)).center()
+    call(stage(root), "zoomTo", 4.0, centre.x(), centre.y())
+    settle()
+    wait(lambda: False, 150)
+    close = export.bytes_of(view.grabWindow().copy(int(centre.x()) - 60, int(centre.y()) - 40, 120, 1)).astype(int)[0]
+    # (Of green: red and blue have squares of their own, a little apart from green's, which
+    # is what the fringe correction is. Between two squares one pixel is the mix of both.)
+    same = float((np.diff(close[:, 1]) == 0).mean())
+    faults.expect(len(set(close[:, 1].tolist())) >= 8 and same > 0.45,
+                  f"at 400 % with the lens corrections on, {same:.0%} of a row's pixels are as their neighbor (the photo's own pixels as squares: half and more)")
+    call(stage(root), "fit")
+    settle()
+    screen = shown_at_full_size(view, root)
+    out = Path(tempfile.mkdtemp(prefix="photone-lens-", dir=SHELF.name))
+    session.exporter.side = 256
+    session.exporter.start([str(p) for p in session.photos], {"kind": "png8", "quality": 92, "longest": 0, "folder": str(out)})
+    carry_out(view, session)
+    file = QImage(str(out / "first.png"))
+    if file.isNull():
+        faults.append(f"a photo with lens corrections was not exported: {session.exporter.failures}")
+    else:
+        written = export.bytes_of(file).astype(int)
+        # (All but a few pixels along the chart's one razor edge, between its colors and its
+        # wedge: read between two pixels there, the picture is as the GPU mixes the two, which
+        # it does to a 256th of a pixel, and the screen's place and the file's are not the same
+        # 256th. And but the frame's outermost four pixels.)
+        gap = np.abs(written - screen)[4:-4, 4:-4] if written.shape == screen.shape else np.full((1, 1, 3), 999)
+        faults.expect((gap > 1).mean() < 0.002 and gap.mean() < 0.05, f"the exported picture is not the one on screen: {(gap > 1).mean():.2%} of it differs, by {gap.mean():.3f} levels on average")
+    faults.extend(audit_layout(view))
+    ui.close_view(view)
+    # A file without figures: nothing to switch, and nothing is done.
+    session = ui.Session([Path("first.arw")], load=chart)
+    view, root = opened(session, "lens")
+    settle()
+    faults.expect(not find(root, "lens:distortion").property("enabled") and session.uniforms["lensOn"] == 0 and "no figures" in find(root, "lens-words").property("text"),
+                  "a file without lens figures: its switches can be pressed, or something is done to it")
+    ui.close_view(view)
+    return faults
+
+
+def audit_fringes() -> list[str]:
+    """Chromatic aberration by hand, measured in the picture: Defringe takes the purple (or
+    the green) seam off an edge and leaves a purple or green thing that is no edge, and the
+    other color's seam; Red / cyan and Blue / yellow draw that color larger or smaller by
+    what the slider says, for a file that carries no figures of its lens."""
+    from photone import lens
+    session = ui.Session([Path("first.png")], load=fringed)
+    view, root = opened(session, "lens")
+    faults = Faults()
+    call(stage(root), "actual")
+    settle()
+
+    def part(x: int, y: int, wide: int, high: int) -> np.ndarray:
+        area = box(root.findChild(QObject, "photo"))
+        wait(lambda: False, 60)
+        return export.bytes_of(view.grabWindow().copy(int(area.left()) + x, int(area.top()) + y, wide, high)).astype(float).mean(axis=(0, 1))
+
+    purple = lambda c: min(c[0], c[2]) - c[1]  # noqa: E731 - how purple a color is, in levels
+    green = lambda c: c[1] - max(c[0], c[2])  # noqa: E731
+    seam, thing = part(239, 40, 2, 80), part(70, 50, 40, 40)
+    low, lump = part(239, 200, 2, 80), part(70, 230, 40, 40)
+    faults.expect(purple(seam) > 60 and green(low) > 60, f"(the photo to try it on: a seam of {seam} and one of {low})")
+    faults.expect(not find(root, "lens:distortion").property("enabled") and find(root, "slider:defringePurple").isVisible(), "a file without figures: the sliders by hand are not there")
+    slider = find(root, "slider:defringePurple")
+    bring(root, "slider:defringePurple")
+    track = slider.findChild(QObject, "track")
+    drag(view, box(slider.findChild(QObject, "thumb")).center().toPoint(), QPoint(int(track.width()), 0))
+    faults.expect(session.history.edit == {"defringePurple": 100.0}, f"Defringe purple dragged to its end: {session.history.edit}")
+    faults.expect(purple(part(239, 40, 2, 80)) < 0.25 * purple(seam) and abs(purple(part(70, 50, 40, 40)) - purple(thing)) <= 2 and abs(green(part(239, 200, 2, 80)) - green(low)) <= 2,
+                  f"Defringe purple at 100: the seam went from {purple(seam):.0f} to {purple(part(239, 40, 2, 80)):.0f} levels of purple, the purple square from {purple(thing):.0f} to {purple(part(70, 50, 40, 40)):.0f}, the green seam from {green(low):.0f} to {green(part(239, 200, 2, 80)):.0f}")
+    session.setEdits({"defringePurple": 0.0, "defringeGreen": 100.0})
+    settle()
+    faults.expect(green(part(239, 200, 2, 80)) < 0.25 * green(low) and abs(green(part(70, 230, 40, 40)) - green(lump)) <= 2 and abs(purple(part(239, 40, 2, 80)) - purple(seam)) <= 2,
+                  f"Defringe green at 100: the seam went from {green(low):.0f} to {green(part(239, 200, 2, 80)):.0f} levels of green, the green square from {green(lump):.0f} to {green(part(70, 230, 40, 40)):.0f}")
+    # Red drawn larger: the edge of the light half lies further out for red than for green.
+    session.setEdits({"defringeGreen": 0.0, "caRed": 100.0, "caBlue": -100.0})
+    settle()
+    area = box(root.findChild(QObject, "photo"))
+    wait(lambda: False, 60)
+    row = export.bytes_of(view.grabWindow().copy(int(area.left()) + 330, int(area.top()) + 20, 100, 20)).astype(float).mean(axis=0)
+    session.setEdits({"caRed": 0.0, "caBlue": 0.0})
+    settle()
+    wait(lambda: False, 60)
+    was = export.bytes_of(view.grabWindow().copy(int(area.left()) + 330, int(area.top()) + 20, 100, 20)).astype(float).mean(axis=0)
+    faults.expect(np.abs(row - was).max() <= 1, "(far from an edge red and blue by hand change nothing: they should not)")
+    session = None
+    ui.close_view(view)
+    # On the chart, whose wedge has steps to measure by: red and blue apart by what the sliders say.
+    session = ui.Session([Path("first.arw")], load=chart)
+    view, root = opened(session, "lens")
+    area = box(root.findChild(QObject, "photo"))
+
+    def step(channel: int) -> float:  # where the wedge's sixth step begins for that color, in pixels across
+        wait(lambda: False, 60)
+        shot = export.bytes_of(view.grabWindow().copy(area.toRect())).astype(float)
+        row = shot[int(0.93 * len(shot)) - 3:int(0.93 * len(shot)) + 3, :, channel].mean(axis=0)
+        first, last = int(0.72 * len(row)), int(0.78 * len(row))
+        rise = np.clip(np.diff(row[first:last]), 0, None)
+        return first + float((np.arange(len(rise)) * rise).sum() / rise.sum())
+
+    still = step(0), step(2)
+    session.setEdits({"caRed": 100.0, "caBlue": -100.0})
+    settle()
+    moved = step(0) - still[0], step(2) - still[1]
+    out = (0.75 - 0.5) * area.width() * 100 * lens.BY_HAND  # (0.2 % of how far the step is from the middle)
+    faults.expect(abs(moved[0] - out) < 0.5 and abs(moved[1] + out) < 0.5 and out > 0.3,
+                  f"Red / cyan at 100 and Blue / yellow at -100: the step moved {moved[0]:.2f} px for red and {moved[1]:.2f} for blue, where {out:.2f} out and in are due")
+    faults.extend(audit_layout(view))
+    ui.close_view(view)
+    return faults
 
 
 def audit_tools() -> list[str]:
-    """The rail and its panels, with real clicks and keys: one panel at a time, T and W, the
-    panel's Compare (held), Reset and Close, a right click on a tool, Reset all."""
+    """The cards of the Adjust tab, with real clicks and keys: Light alone open at the start
+    (the owner's choice), a card's head folds and opens it, T and W open theirs and bring them in sight,
+    a card's A/B (held) and Reset, Reset all."""
     session = ui.Session([Path("first.arw")], load=chart)
     view, root = opened(session)
     faults = Faults()
+    cards = ("tone", "balance", "saturation", "eq", "chroma")
+    column = box(find(root, "tools-scroll"))
 
     def shown() -> list[str]:
-        return [n for n in ("tone", "curve", "balance") if find(root, f"panel:{n}").isVisible()]
+        return [n for n in cards if find(root, f"panel:{n}").property("open")]
+
+    def head(name: str) -> None:  # a click on a card's head
+        bring(root, f"panel:{name}")
+        tap(view, box(find(root, f"panel:{name}")).topLeft().toPoint() + QPoint(80, 14))
+        view.grabWindow()  # (a frame: the card has its height)
+        wait(lambda: False, 60)  # (opened, it is brought into the column's middle a moment later)
+        settle()
+        view.grabWindow()
 
     def key(which) -> None:
         QCoreApplication.sendEvent(root, QKeyEvent(QEvent.Type.KeyPress, which, Qt.KeyboardModifier.NoModifier))
         settle()
+        view.grabWindow()
 
-    faults.expect(shown() == ["tone"], f"at the start the open panels are {shown()}, not Tone")
-    rail, top, foot = (box(find(root, name)) for name in ("screen:rail", "rail:Tone", "rail:Clipping"))
-    gaps = (top.left() - rail.left(), rail.right() - top.right(), top.top() - rail.top(), rail.bottom() - foot.bottom())
-    faults.expect(max(gaps) - min(gaps) <= 0.5, f"the rail's buttons are not as far from its edge on every side: left, right, top, bottom {gaps}")
-    click(view, find(root, "rail:Tone curve"))
-    faults.expect(shown() == ["curve"], f"after pressing Tone curve on the rail: {shown()}")
-    click(view, find(root, "rail:Tone curve"))
-    faults.expect(shown() == [], f"pressing an open tool again does not close it: {shown()}")
+    faults.expect(shown() == ["tone"], f"at the start the open cards are {shown()}, not Light alone")
+    faults.expect(all(find(root, f"panel:{n}").isVisible() for n in cards), "not every card of Adjust is in the column")
+    head("eq")
+    plot = find(root, "curve-plot")
+    faults.expect(shown() == ["tone", "eq"] and plot.isVisible(), f"a click on Color EQ's head: open {shown()}, the tone curve in Light {plot.isVisible()}")
+    head("eq")
+    faults.expect(shown() == ["tone"], f"a click on an open card's head does not fold it: {shown()}")
+    head("tone")
+    faults.expect(shown() == [] and not plot.isVisible(), f"folding Light left {shown()}, its curve {plot.isVisible()}")
     key(Qt.Key.Key_W)
-    faults.expect(shown() == ["balance"], f"W does not open White balance: {shown()}")
+    faults.expect(shown() == ["balance"] and column.contains(box(find(root, "balance-pad"))), f"W does not open White balance in sight: {shown()}")
     key(Qt.Key.Key_T)
-    faults.expect(shown() == ["tone"], f"T does not open Tone: {shown()}")
-    session.setEdits({"contrast": 40.0, "curve": LIFT})
+    faults.expect(shown() == ["tone", "balance"] and column.contains(box(find(root, "slider:exposure"))), f"T does not open Light in sight: {shown()}")
+    session.setEdits({"contrast": 40.0, "curve": LIFT, "saturation": 120.0})
     session.commitEdit()
     settle()
     at = box(find(root, "compare:tone")).center().toPoint()
@@ -3242,21 +4362,16 @@ def audit_tools() -> list[str]:
     held = session.uniforms
     QTest.mouseRelease(view, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, at)
     settle()
-    faults.expect(held["contrast"] == 0 and held["curveOn"] == 1 and session.uniforms["contrast"] > 0,
-                  "holding Compare does not show the photo without that tool, and only that tool")
+    faults.expect(held["contrast"] == 0 and held["curveOn"] == 0 and session.uniforms["contrast"] > 0,
+                  "holding A/B does not show the photo without that card, and only that card")
     click(view, find(root, "reset:tone"))
-    faults.expect(session.history.edit == {"curve": LIFT}, f"Reset on the Tone panel left {session.history.edit}")
+    faults.expect(session.history.edit == {"saturation": 120.0}, f"Reset on the Light card left {session.history.edit}")
     session.undo()
-    QTest.mouseClick(view, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier,
-                     box(find(root, "rail:Tone curve")).center().toPoint())
-    settle()
-    faults.expect(session.history.edit == {"contrast": 40.0}, f"a right click on a tool left {session.history.edit}")
+    bring(root, "reset-all")
     click(view, find(root, "reset-all"))
     faults.expect(session.history.edit == {}, f"Reset all left {session.history.edit}")
     session.undo()
-    faults.expect(session.history.edit == {"contrast": 40.0}, "Reset all is not one step of undo")
-    click(view, find(root, "close:tone"))
-    faults.expect(shown() == [], f"Close does not close the panel: {shown()}")
+    faults.expect(session.history.edit == {"contrast": 40.0, "curve": LIFT, "saturation": 120.0}, "Reset all is not one step of undo")
     ui.close_view(view)
     return faults
 
@@ -3353,9 +4468,14 @@ def audit_balance() -> list[str]:
     QCoreApplication.sendEvent(root, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier))
     settle()
     faults.expect(not stage(root).property("picking"), "Esc does not end Pick neutral")
-    click(view, find(root, "pick-neutral"))
-    click(view, find(root, "close:balance"))
-    faults.expect(not stage(root).property("picking"), "closing the panel leaves the photo waiting for a pick")
+    # Its button out of sight, nothing is waiting for a pick: the card folded, another tab.
+    for leave, how in ((lambda: tap(view, box(find(root, "panel:balance")).topLeft().toPoint() + QPoint(80, 14)), "folding the card"),
+                       (lambda: (bring(root, "modes"), click(view, find(root, "mode:masks"))), "going to the Masks tab")):
+        click(view, find(root, "pick-neutral"))
+        faults.expect(stage(root).property("picking") == "neutral", "(Pick neutral did not start again)")
+        leave()
+        faults.expect(not stage(root).property("picking"), f"{how} leaves the photo waiting for a pick")
+        show(root, "balance")
     ui.close_view(view)
     return faults
 
@@ -3495,7 +4615,7 @@ def audit_tone() -> list[str]:
     # The three sliders are there, each in its panel, and a drag to the right raises its setting.
     session.history = edit.History()
     for tool, key in (("tone", "whites"), ("tone", "blacks"), ("tone", "midtones"), ("saturation", "vibrance")):
-        session.setPanel("tool", tool)
+        show(root, tool)
         settle()
         view.grabWindow()
         slider = next((i for i in items(root) if i.objectName() == f"slider:{key}" and i.isVisible()), None)
@@ -3512,7 +4632,6 @@ def audit_scopes() -> list[str]:
     """The histogram is counted from the picture as displayed and says when pixels sit at
     white or black; Clipping paints those pixels, and only those."""
     session = ui.Session([Path("first.arw")], load=chart)
-    session.setPanel("histogram", True)
     view, root = opened(session)
     faults = Faults()
     faults.expect(counted(view, session), "the histogram is never counted")
@@ -3605,12 +4724,13 @@ def shoot(name: str) -> list[str]:
         stage(root).setProperty("showMask", 0)  # nor a mask shown in its place
         stage(root).setProperty("picking", "")  # and a drag on the photo is to move it
         if session.panels["tool"] == "crop":  # nor the photo dimmed around its frame
-            session.setPanel("tool", "")
+            call(root, "go", "edit")
             settle()
         if any(i.isVisible() and i.objectName().startswith("modal:") for i in items(root)):
             faults += audit_modal(view, root)  # a question is open: nothing else may respond
-        elif root.property("place") == "edit" and not name.startswith("strip"):  # (in the library or
-            # Export the photo is not on show; the filmstrip's shots show a photo that is no chart)
+        elif root.property("place") == "edit" and not name.startswith(("strip", "lens")):  # (in the library or
+            # Export the photo is not on show; the filmstrip's shots show a photo that is no chart,
+            # and the lens shots a chart that is bent and lit by its lens's figures: "(lens)" measures that)
             faults += (audit_develop(view, root, session) + audit_view(view, root, session)
                        + audit_gestures(view, root, session))
     ON_SHELF[0] = None  # with its window, not when the next shot begins (see app.close_view)
@@ -3640,7 +4760,7 @@ def sheet(names: list[str], title: str) -> None:
 AUDITS = {"(keys)": audit_stepping, "(column)": audit_column, "(wheel)": audit_wheel,
           "(wheel data)": audit_wheel_data, "(dots)": audit_dots_place, "(pixels)": audit_pixels, "(colors data)": audit_colors_data, "(pins)": audit_pins,
           "(pin panel)": audit_pin_panel,
-          "(masks)": audit_masks, "(masks data)": audit_masks_data, "(moves)": audit_moves, "(scroll)": audit_scroll, "(resume)": audit_resume, "(strip)": audit_strip, "(local)": audit_local, "(fourth)": audit_fourth, "(menu)": audit_menu, "(color tools)": audit_color_tools,
+          "(masks)": audit_masks, "(masks data)": audit_masks_data, "(moves)": audit_moves, "(scroll)": audit_scroll, "(resume)": audit_resume, "(strip)": audit_strip, "(local)": audit_local, "(fourth)": audit_fourth, "(mono)": audit_mono, "(detail)": audit_detail, "(lens)": audit_lens, "(fringes)": audit_fringes, "(grain)": audit_grain, "(look)": audit_look, "(presets)": audit_presets, "(lut)": audit_lut, "(table)": audit_table, "(menu)": audit_menu, "(color tools)": audit_color_tools,
           "(test chart)": audit_test_chart, "(library)": audit_library, "(export)": audit_export,
           "(frame)": audit_frame, "(crop)": audit_crop, "(slider)": audit_slider, "(tools)": audit_tools,
           "(curve)": audit_curve, "(balance)": audit_balance, "(start)": audit_start, "(tone)": audit_tone, "(scopes)": audit_scopes,
@@ -3664,7 +4784,9 @@ def chosen(args: list[str]) -> tuple[list[str], list[str], str]:
 
 def main() -> int:
     # Should it ever hang: say where, and end, rather than sit there (it did once, unexplained).
-    faulthandler.dump_traceback_later(180, exit=True)
+    # (Ten minutes: all of it takes three by now, and it once ended here in the middle of an
+    # audit that was only slow.)
+    faulthandler.dump_traceback_later(600, exit=True)
     args = sys.argv[1:]
     if "--list" in args:
         print("\n".join([*SHOTS, *AUDITS]))

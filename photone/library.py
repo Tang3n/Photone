@@ -529,6 +529,7 @@ class Library(QObject):
         if cache is None:
             self._tidy()
         self.all: list[dict] = []
+        self._taken, self._held = {}, False  # the look that was copied, and whether one was
         self._where, self._filter, self._busy = "all", dict(self.NO_FILTER), False
         self.last, self.lasts = "", {}  # (`lasts`: the photo last looked at in each place)
         if settings:
@@ -897,19 +898,59 @@ class Library(QObject):
             at = self.model.pathed.get(path)
             photo = self.model.rows[at] if at is not None else self._loose(path)
             if photo:
-                self._reset(photo)
+                self._put(photo, lambda was: {})
         self._news()
         self.thumbsChanged.emit()
 
-    def _reset(self, photo: dict) -> None:
+    # A look taken from one photo, to lay on others (edit.look_of): the whole program has one.
+    lookChanged = Signal()
+
+    @Property("QVariantMap", notify=lookChanged)
+    def look(self) -> dict:
+        return self._taken
+
+    @Property(bool, notify=lookChanged)
+    def hasLook(self) -> bool:  # noqa: N802
+        return self._held
+
+    @Slot(str)
+    def copyLook(self, path: str) -> None:  # noqa: N802
+        """Take that photo's look, as its edit stands in the catalog (the open photo's is
+        written there first, see Main.qml)."""
+        at = self.model.pathed.get(path)
+        photo = self.model.rows[at] if at is not None else self._loose(path)
+        if self.catalog and photo:
+            had = self.catalog.load(photo["key"], Path(photo["path"]))
+            self._taken, self._held = edit.look_of(had), True
+            self.lookChanged.emit()
+
+    @Slot("QVariantList")
+    def pasteLook(self, paths: list) -> None:  # noqa: N802
+        """Lay the look that was taken on these photos, each in its catalog entry, where it
+        becomes a step that undo takes back once the photo is open. (Not on the photo open in
+        Edit: that is the session's to do, as with a reset.)"""
+        if not (self.catalog and self._held):
+            return
+        for path in paths:
+            at = self.model.pathed.get(path)
+            photo = self.model.rows[at] if at is not None else self._loose(path)
+            if photo:
+                self._put(photo, lambda was: edit.with_look(was, self._taken))
+        self._news()
+        self.thumbsChanged.emit()
+
+    def _put(self, photo: dict, change) -> None:
+        """Another edit for a photo that is not open: `change(the edit it has)` is written as
+        a step after those it had."""
         key, file, name = photo["key"], Path(photo["path"]), photo["thumb"]
         was = self.catalog.load(key, file)
-        if was:
+        now = change(was)
+        if now != was:
             states, at = self.catalog.steps(key) or ([was], 0)
-            states = [*states[:at + 1], {}][-edit.History.KEPT:]
-            self.catalog.save(key, file, {}, self.catalog.checkpoints(key))
+            states = [*states[:at + 1], now][-edit.History.KEPT:]
+            self.catalog.save(key, file, now, self.catalog.checkpoints(key))
             self.catalog.save_steps(key, states, len(states) - 1)
-        # Its thumbnail showed the edit: made anew from the photo itself.
+        # Its thumbnail showed the edit it had: made anew from the photo itself.
         (self.cache / f"{name}.jpg").unlink(missing_ok=True)
         self.model.ready.discard(name)
         self.asked.discard(name)

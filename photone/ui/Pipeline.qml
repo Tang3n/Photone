@@ -7,6 +7,10 @@ ShaderEffect {
     property var source                // the first picture (an Image)
     property var sharp: source         // the full-size one, once it is there
     property var painted: source       // the photo's painted masks (PhotoView's `painted`); any picture where there are none
+    // The picture of the photo's LUTs (PhotoView's `lut`), where it has any and it is there;
+    // without it none is laid on, whatever the edit says.
+    property var lutPicture: null
+    property var lut: lutPicture || source
     property real useSharp: 0
     property real crisp: 0
     property vector4d cropBox: Qt.vector4d(0, 0, 1, 1)
@@ -37,6 +41,7 @@ ShaderEffect {
     property real pinCount: edit.pinCount
     property real reach: 0
     property real look: edit.look
+    property real mono: edit.mono
     property real saturation: edit.saturation
     property real vibrance: edit.vibrance
     property real chromaOn: edit.chromaOn
@@ -78,6 +83,34 @@ ShaderEffect {
     property matrix4x4 chroma2M: edit.chroma2M
     property matrix4x4 eq2A0: edit.eq2A0
     property matrix4x4 eq2A1: edit.eq2A1
+    property real grain: edit.grain
+    property real grainWide: edit.grainWide
+    property real grainHigh: edit.grainHigh
+    property real grainRough: edit.grainRough
+    property real grainColor: edit.grainColor
+    property matrix4x4 grainX: edit.grainX
+    property matrix4x4 grainY: edit.grainY
+    property matrix4x4 grainM: edit.grainM
+    property real lutCount: lutPicture ? edit.lutCount : 0
+    property matrix4x4 lutsA: edit.lutsA
+    property matrix4x4 lutsB: edit.lutsB
+    property matrix4x4 lutsC: edit.lutsC
+    property matrix4x4 lutsD: edit.lutsD
+    property real detailX: edit.detailX
+    property real detailY: edit.detailY
+    property real sharpen: edit.sharpen
+    property real sharpenRadius: edit.sharpenRadius
+    property real sharpenMask: edit.sharpenMask
+    property real denoise: edit.denoise
+    property real denoiseColor: edit.denoiseColor
+    property real lensOn: edit.lensOn
+    property real lensShape: edit.lensShape
+    property matrix4x4 lensGreen: edit.lensGreen
+    property matrix4x4 lensRed: edit.lensRed
+    property matrix4x4 lensBlue: edit.lensBlue
+    property matrix4x4 lensLight: edit.lensLight
+    property real defringePurple: edit.defringePurple
+    property real defringeGreen: edit.defringeGreen
     fragmentShader: pipelineShader
     vertexShader: pipelineVertex
 }

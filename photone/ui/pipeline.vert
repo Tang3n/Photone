@@ -31,6 +31,7 @@ layout(std140, binding = 0) uniform buf {  // must match pipeline.frag exactly
     float pinCount;
     float reach;
     float look;
+    float mono;
     float saturation;
     float vibrance;
     float chromaOn;
@@ -77,6 +78,34 @@ layout(std140, binding = 0) uniform buf {  // must match pipeline.frag exactly
     mat4 chroma2M;
     mat4 eq2A0;
     mat4 eq2A1;
+    float grain;      // Film grain (edit.grain_uniforms): how far a grain is from the picture's lightness,
+    float grainWide;  // how many grains lie across the stored picture,
+    float grainHigh;  // and down it,
+    float grainRough; // how much of it is clumps three grains wide,
+    float grainColor; // and how colored it is.
+    mat4 grainX;      // How strong it is from black to white: a curve, as the tone curve is one.
+    mat4 grainY;
+    mat4 grainM;
+    float lutCount;   // The photo's LUTs (edit.luts_uniforms): how many, and one column each:
+    mat4 lutsA;       // points a side, how much of it is laid on, the row its slices begin at.
+    mat4 lutsB;       // (Four to a matrix: sixteen in all.)
+    mat4 lutsC;
+    mat4 lutsD;
+    float detailX;    // Sharpening and noise reduction (edit.detail_uniforms): one pixel of the stored
+    float detailY;    // picture as a share of it, across and down;
+    float sharpen;    // how much of a pixel's difference from its neighbors is added,
+    float sharpenRadius; // how far those neighbors are, in pixels,
+    float sharpenMask;   // and the difference below which nothing is;
+    float denoise;    // how far apart two pixels' lightness may be and count as one surface,
+    float denoiseColor;  // and how far for their color.
+    float lensOn;     // Lens corrections (photone/lens.py, tables): 1 if any is anything.
+    float lensShape;  // The stored picture's width over its height.
+    mat4 lensGreen;   // Sixteen numbers each, from the picture's middle (the first) to its corner:
+    mat4 lensRed;     // how many times further out the stored picture is read, for green, red
+    mat4 lensBlue;    // and blue (distortion, chromatic aberration),
+    mat4 lensLight;   // and how many times lighter a pixel is made (vignetting).
+    float defringePurple; // Fringes at edges taken out by their color (`defringed`): how much of the
+    float defringeGreen;  // purple ones, and of the green ones.
 };
 void main() {
     // Which part of the stored picture this corner of the item shows: the photo's frame

@@ -1,26 +1,30 @@
 import QtQuick
 import "."
 
-// A section of the right column, on a card of its own: a title, what belongs to it below. With
-// `tool` set it is the panel of one of the rail's tools (edit.TOOLS) and its header offers
-// Compare (held: the photo without this tool), Reset and closing.
+// A section of a side column, on a card of its own: a title, what belongs to it below. With
+// `tool` set it is the card of one of the edit's tools (edit.TOOLS) and its head offers
+// A/B (held: the photo without this tool) and Reset.
 Column {
     id: panel
     property string title
     property string tool: ""
-    property string card: ""     // which of Theme.cards it is: its icon (and, in the trial, its color)
+    property string card: ""     // which of Theme.cards it is: its icon and its color
     default property alias content: body.data
-    // As one of a column of sections that are all there (M16's trial, Main.qml `sections`): a
+    // As one of a column of cards that are all there: a
     // press on its header folds it to that header, or opens it.
     property bool folds: false
     property bool open: true
     property bool plain: false   // a part of another section's card: no card of its own
-    property bool closes: true   // offers Close (not where tabs choose what is shown)
     // A card of a mask's own settings: its header offers Reset alone, which asks its owner.
     property bool local: false
     property bool changed: false
     signal reset()
     signal fold()
+    // A tool's card on the new screen: A/B stays on its head when it is folded, and Reset
+    // stands after the title and its dot, there only when the card has changed the photo
+    // (the owner: "all cards could have an A/B button even collapsed", Reset "right after
+    // the title and the unsaved status dot"; his choice of two renders).
+    readonly property bool headed: tool !== "" && card !== "" && !plain && !local
     property bool made: false
     Component.onCompleted: made = true
     onOpenChanged: if (made && open && folds) under.flash()
@@ -56,16 +60,24 @@ Column {
             Accessible.name: panel.title + (panel.folds ? (panel.open ? ", open" : ", folded") : "")
         }
         Rectangle {   // folded, it still says that it has changed the photo
+            id: dot
             visible: panel.folds && panel.tool !== "" && session.adjusted[panel.tool] === true
             // (8 px on the new screen's cards, where titles and icons are larger; the owner:
             // "a bigger dot for consistency with the rest of the UI".)
             readonly property real size: panel.card !== "" ? 8 : 5
             x: heading.x + heading.width + 10; y: heading.y + heading.height / 2 - size / 2; width: size; height: size; radius: size / 2; color: Theme.mark
         }
+        TextButton {
+            objectName: panel.headed ? "reset:" + panel.tool : ""
+            visible: panel.headed && session.adjusted[panel.tool] === true
+            x: (dot.visible ? dot.x + dot.width : heading.x + heading.width) + 12; y: Theme.cardMid - height / 2
+            sign: Theme.resetSign; says: "Reset"; strong: true
+            onPressed: session.resetTool(panel.tool)
+        }
         Row {
             // (Each on the head's middle line, as the title and its icon are; the sign's own
             // strokes end 2 px inside its box, so it stands that much nearer the card's edge.)
-            y: Theme.cardMid - height / 2; height: 20; anchors { right: parent.right; rightMargin: panel.card !== "" ? -2 : 0 } spacing: panel.card !== "" ? 12 : 14; visible: (panel.tool !== "" || panel.local) && (!panel.folds || panel.open)
+            y: Theme.cardMid - height / 2; height: 20; anchors { right: parent.right; rightMargin: panel.card !== "" ? -2 : 0 } spacing: panel.card !== "" ? 12 : 14; visible: (panel.tool !== "" || panel.local) && (!panel.folds || panel.open || (panel.headed && panel.card !== "crop"))
             TextButton {
                 objectName: "compare:" + panel.tool
                 anchors.verticalCenter: parent.verticalCenter
@@ -78,20 +90,14 @@ Column {
                 onHeldChanged: session.setBypass(held ? panel.tool : "")
             }
             TextButton {
-                objectName: "reset:" + panel.tool
+                objectName: panel.headed ? "" : "reset:" + panel.tool
                 anchors.verticalCenter: parent.verticalCenter
                 // (Not on a part of another card: the pin's settings are in the Tone Wheel's
                 // card, which has its own Reset; this one took the photo's masks along.)
-                visible: !panel.plain
+                visible: !panel.plain && !panel.headed
                 text: panel.card !== "" ? "" : "Reset"; sign: panel.card !== "" ? Theme.resetSign : ""; says: "Reset"; strong: panel.card !== ""
                 available: panel.local ? panel.changed : session.adjusted[panel.tool] === true
                 onPressed: panel.local ? panel.reset() : session.resetTool(panel.tool)
-            }
-            TextButton {
-                objectName: "close:" + panel.tool
-                anchors.verticalCenter: parent.verticalCenter
-                visible: !panel.folds && !panel.plain && panel.closes
-                text: "Close"; onPressed: session.setPanel("tool", "")
             }
         }
     }

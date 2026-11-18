@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import gc
+import json
 import math
 import os
 import re
@@ -18,6 +19,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -56,10 +58,11 @@ from PySide6.QtGui import (
 from PySide6.QtQml import QJSValue, QQmlImageProviderBase
 from PySide6.QtQuick import QQuickImageProvider, QQuickItem, QQuickView
 
-from photone import HOMEPAGE, QUIET, __version__, decode, edit, scopes, shaders
+from photone import HOMEPAGE, QUIET, __version__, decode, edit, lut, scopes, shaders
 from photone.catalog import Catalog, identify
 from photone.export import Exporter
 from photone.library import Library, about
+from photone.presets import Presets
 
 UI = Path(__file__).parent / "ui"
 
@@ -159,11 +162,14 @@ class Session(QObject):
     curveChanged = Signal()
     chromaChanged = Signal()
     eqChanged = Signal()
+    bwChanged = Signal()
+    grainCurveChanged = Signal()
+    lutsChanged = Signal()
     masksChanged = Signal()
     listed = Signal()  # the photos at hand are other photos (the filmstrip's row)
     saved = Signal()   # the edit has come to rest (and is in the catalog, where there is one)
     checkpointsChanged = Signal()
-    LISTS = ("pins", "curve", "chroma", "eq", "masks")
+    LISTS = ("pins", "curve", "chroma", "eq", "bw", "grainCurve", "luts", "masks")
     photoChanged = Signal()  # another photo is shown: its view starts afresh
     described = Signal(int, object)  # from a loader thread: (generation, the photo's description)
 
@@ -211,7 +217,7 @@ class Session(QObject):
         self._histogram, self._lab, self._after, self._cloud = {}, None, None, None
         self._range = ("full", 0.0, 1.0)
         self._panels = {"tool": self._kept("view/tool", "tone", str),
-                        "histogram": self._kept("view/histogram", False, bool), "clipping": False,
+                        "clipping": False,
                         "live": self._kept("view/live", True, bool), "chart": False,
                         # (Where the window was when it was last closed: the library, or Edit.)
                         "place": self._kept("view/place", "library", str)}
@@ -324,6 +330,270 @@ class Session(QObject):
         masks[number - 1]["strokes"] = strokes
         self.setEdits({"masks": masks})
 
+    @property
+    def luts(self) -> Path:
+        """Where the LUTs that were brought in are kept, each under what its file holds:
+        beside the catalog, or (with none: the checks) where nothing stays."""
+        home = self.catalog.path.parent if self.catalog else Path(tempfile.gettempdir()) / "photone"
+        return self.luts_home or home / "luts"
+
+    luts_home: Path | None = None  # (the checks: a folder of their own)
+
+    # ---- LUTs: those installed in Photone, and those laid on the open photo ----------------
+
+    installedChanged = Signal()
+
+    def _shelf(self) -> list[dict]:
+        """The LUTs that are installed, by name: `id` (what its file is kept under), `name`,
+        `size`, `print` (lut.fingerprint: what tells a LUT that is installed already) and
+        `also` (other ids it is found by: what its file's text is told by, which is how a
+        photo edited on the first day names it). Kept in a list beside their files; a file
+        that is there without being in it (put there by hand, or by the first day's Photone)
+        is taken in under the name it gives itself."""
+        if self._installed is None:
+            self._stale = False
+            found = {one["id"]: one for one in self._listed_before()}
+            for file in sorted(self.luts.glob("*.cube")) if self.luts.is_dir() else []:
+                read = self._read(file.stem) if file.stem not in found else None
+                if read:
+                    self._stale = True
+                    found[file.stem] = {"id": file.stem, "name": lut.title(read[0]) or file.stem,
+                                        "size": len(read[1]), "print": lut.fingerprint(read[1]),
+                                        "also": [lut.written(read[0])]}
+            self._installed = sorted(found.values(), key=lambda one: one["name"].lower())
+            if self._stale:  # (what was worked out is written down: not again the next time)
+                self._keep_shelf()
+        return self._installed
+
+    def _read(self, name: str, parsed: bool = True) -> tuple[str, np.ndarray | None] | None:
+        """An installed LUT's file as (its text, its table); None if it is not there, or
+        no LUT. `parsed` False: the text alone."""
+        try:
+            if not name.isalnum():
+                return None
+            text = (self.luts / f"{name}.cube").read_text("utf-8", errors="replace")
+            return text, lut.parse(text) if parsed else None
+        except (OSError, ValueError):
+            return None
+
+    def _listed_before(self) -> list[dict]:
+        """What the list beside the files says is installed, as far as it is true: each one
+        valid, its file there; and what the list did not say yet (`print`, `also`) worked out
+        from the file."""
+        try:
+            listed = json.loads((self.luts / "index.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            return []
+        found = []
+        for one in listed if isinstance(listed, list) else []:
+            with contextlib.suppress(ValueError, KeyError, TypeError):
+                had = edit.valid_lut({**one, "strength": 100.0})
+                told, also = one.get("print"), one.get("also")
+                if not told or not isinstance(also, list):
+                    self._stale = True
+                    read = self._read(had["id"], parsed=not told)
+                    told, also = told or lut.fingerprint(read[1]), [lut.written(read[0])]
+                also = [str(name) for name in also if str(name).isalnum()][:8]
+                if (self.luts / f"{had['id']}.cube").is_file():
+                    found.append({"id": had["id"], "name": had["name"], "size": had["size"],
+                                  "print": str(told), "also": also})
+        return found
+
+    _installed: list | None = None
+    _stale = False
+    _lut_serial = 0
+    twice: list = []  # (file, the installed LUT it is the same as), of the last install
+
+    def _keep_shelf(self) -> None:
+        with contextlib.suppress(OSError):
+            part = self.luts / "index.part"
+            part.write_text(json.dumps(self._installed, indent=1), "utf-8")
+            os.replace(part, self.luts / "index.json")
+
+    def _listed(self, now: list[dict]) -> None:
+        self._installed = sorted(now, key=lambda one: one["name"].lower())
+        self._keep_shelf()
+        # (What is installed is another: the picture of the photo's LUTs is asked for anew,
+        # under another address, and the photo's list says again which of them are gone.)
+        self._lut_serial += 1
+        self._tables.clear()
+        self.installedChanged.emit()
+        self.lutsChanged.emit()
+
+    def _found(self, name: str) -> dict | None:
+        """The installed LUT a photo means by that id: the one kept under it, or one that is
+        also found by it."""
+        shelf = self._shelf()
+        return (next((one for one in shelf if one["id"] == name), None)
+                or next((one for one in shelf if name in one["also"]), None))
+
+    @Property("QVariantList", notify=installedChanged)
+    def lutsInstalled(self) -> list:  # noqa: N802
+        return self._shelf()
+
+    def _install(self, path: Path) -> dict:
+        """Take a .cube file in: a copy is kept under what its table holds (lut.fingerprint),
+        so nothing hangs on where the file was. One whose table is installed already, under
+        whatever name and however its file is written, is not installed again: `twice` then
+        names the file and the one that is there. The LUT as the list has it, or ValueError
+        saying what is wrong."""
+        try:
+            if path.stat().st_size > lut.BYTES:
+                raise ValueError("the file is too large to be a LUT")
+            text = path.read_text("utf-8", errors="replace")
+            table = lut.parse(text)
+            name, other = lut.fingerprint(table), lut.written(text)
+            there = next((had for had in self._shelf() if had["print"] == name), None)
+            if there:
+                self.twice.append((path.name, there["name"]))
+                if other not in (there["id"], *there["also"]):  # (found by this file's id too)
+                    there = {**there, "also": [*there["also"], other][-8:]}
+                    self._listed([there if one["id"] == there["id"] else one
+                                  for one in self._shelf()])
+                return there
+            self.luts.mkdir(parents=True, exist_ok=True)
+            part = self.luts / f"{name}.part"
+            part.write_text(text, "utf-8")
+            os.replace(part, self.luts / f"{name}.cube")
+        except OSError as trouble:
+            raise ValueError(str(trouble)) from trouble
+        one = {"id": name, "name": path.stem[:80], "size": len(table), "print": name,
+               "also": [other]}
+        self._listed([*self._shelf(), one])
+        return one
+
+    @Slot("QVariantList")
+    def installLuts(self, files: list) -> None:  # noqa: N802
+        """Install these .cube files (URLs or paths). Says which could not be used."""
+        paths = [Path(QUrl(f).toLocalFile() if "://" in str(f) else str(f)) for f in
+                 (f.toString() if isinstance(f, QUrl) else f for f in files)]
+        said, self.twice = [], []
+        for path in paths:
+            try:
+                self._install(path)
+            except ValueError as trouble:
+                said.append(f"{path.name} cannot be used as a LUT: {trouble}.")
+        said += [f"{file} is installed already, as “{name}”." for file, name in self.twice]
+        self.say(" ".join(said))
+
+    @Slot(str)
+    def uninstallLut(self, which: str) -> None:  # noqa: N802
+        """Take a LUT out of Photone: its file goes. Photos it is laid on keep their entry,
+        which says that it is gone and changes nothing."""
+        if any(one["id"] == which for one in self._shelf()):
+            (self.luts / f"{which}.cube").unlink(missing_ok=True)
+            self._listed([one for one in self._shelf() if one["id"] != which])
+
+    def _luts(self) -> list[dict]:
+        return list(self.history.edit.get("luts", []))
+
+    def _put_luts(self, now: list[dict]) -> None:
+        self.history.commit()
+        self.history.put({"luts": now})
+        self.history.commit()
+        self._edited()
+
+    @Slot(str, result=int)
+    @Slot(str, int, result=int)
+    def addLut(self, which: str, at: int = -1) -> int:  # noqa: N802
+        """Lay an installed LUT on the open photo at that place of its list (after those it
+        has, with none given), at full strength, as one step of undo. Its place in the
+        photo's list, or -1 (there is room for edit.LUTS)."""
+        one = next((had for had in self._shelf() if had["id"] == which), None)
+        if not (one and self.photos):
+            return -1
+        if len(self._luts()) >= edit.LUTS:
+            self.say(f"A photo can have {edit.LUTS} LUTs: take one away first.")
+            return -1
+        now = self._luts()
+        at = len(now) if at < 0 else min(at, len(now))
+        self._put_luts([*now[:at], {**one, "strength": 100.0}, *now[at:]])
+        return at
+
+    @Slot(int, "QVariantMap")
+    def setLut(self, at: int, values: dict) -> None:  # noqa: N802
+        """Change one of the photo's LUTs: its `strength`, or `off`. (A drag of the slider is
+        one step once it is let go: commitEdit.)"""
+        now = self._luts()
+        if 0 <= at < len(now):
+            now[at] = {**now[at], **{k: values[k] for k in ("strength", "off") if k in values}}
+            self.setEdits({"luts": now})
+
+    @Slot(int)
+    def removeLut(self, at: int) -> None:  # noqa: N802
+        now = self._luts()
+        if 0 <= at < len(now):
+            self._put_luts(now[:at] + now[at + 1:])
+
+    @Slot(int, int)
+    def moveLut(self, at: int, to: int) -> None:  # noqa: N802
+        """Another place in the order they are laid on."""
+        now = self._luts()
+        if 0 <= at < len(now) and 0 <= to < len(now) and at != to:
+            now.insert(to, now.pop(at))
+            self._put_luts(now)
+
+    @Slot(str)
+    def importLut(self, file: str) -> None:  # noqa: N802
+        """A .cube file dropped on the photo: installed, and laid on the open photo."""
+        path = Path(QUrl(file).toLocalFile() if "://" in file else file)
+        if not self.photos:
+            return self.say("Open a photo first: a LUT is laid on a photo.")
+        try:
+            self.twice = []
+            self.addLut(self._install(path)["id"])
+        except ValueError as trouble:
+            self.say(f"{path.name} cannot be used as a LUT: {trouble}.")
+
+    @Property("QVariantMap", notify=changed)
+    def lensHas(self) -> dict:  # noqa: N802
+        """Which lens corrections the open photo's file carries the camera's figures for."""
+        found = (self._camera or {}).get("lens") or {}
+        return {"distortion": "distortion" in found, "color": "red" in found,
+                "vignetting": "vignetting" in found}
+
+    @Property(int, constant=True)
+    def lutsMost(self) -> int:  # noqa: N802
+        """How many LUTs a photo can have."""
+        return edit.LUTS
+
+    @Property("QVariantList", notify=lutsChanged)
+    def lutsOn(self) -> list:  # noqa: N802
+        """The LUTs laid on the open photo, in order, each under the name the installed LUT
+        has now (it may have been installed again under another); `lost` on one that is not
+        installed (it changes nothing then)."""
+        found = [(one, self._found(one["id"])) for one in self._luts()]
+        return [{**one, "name": there["name"] if there else one["name"], "lost": there is None}
+                for one, there in found]
+
+    @Property(str, notify=lutsChanged)
+    def lutSource(self) -> str:  # noqa: N802 - read from QML
+        """The picture of the open photo's LUTs for the shader, or nothing."""
+        had = self._luts()
+        return f"image://photo/lut/{lut.address(had)}/{self._lut_serial}" if had else ""
+
+    _tables: dict = {}  # the installed LUTs' tables that were read, by id (None: no LUT there)
+
+    def _lut_at(self, which: str) -> QImage | None:
+        """Some LUTs (lut.address) as the one picture the shader reads them from; one whose
+        file is gone or is no LUT any more, as a table that changes nothing. On Qt's image
+        loader thread."""
+        try:
+            tables = []
+            for name, size in lut.asked(which):
+                if name not in self._tables:  # (read once: a large one takes a moment)
+                    there = self._found(name)
+                    read = self._read(there["id"]) if there else None
+                    self._tables[name] = read[1] if read else None
+                table = self._tables[name]
+                there = table is not None and len(table) == size
+                tables.append(table if there else lut.identity(size))
+        except ValueError:
+            return None
+        flat = lut.stacked(tables)
+        high, wide = flat.shape[:2]
+        return QImage(flat.tobytes(), wide, high, wide * 8, QImage.Format.Format_RGBA16FPx4).copy()
+
     @Property(str, notify=changed)
     def paintedSource(self) -> str:  # noqa: N802 - read from QML
         """The picture of the photo's painted masks (`painted`), for the shader; another
@@ -385,6 +655,26 @@ class Session(QObject):
     @Property("QVariantList", notify=eqChanged)
     def eq(self) -> list:
         return self.history.edit.get("eq", [])
+
+    @Property("QVariantList", notify=grainCurveChanged)
+    def grainCurve(self) -> list:  # noqa: N802
+        return self.history.edit.get("grainCurve", edit.DEFAULTS["grainCurve"])
+
+    @Property("QVariantList", notify=grainCurveChanged)
+    def grainLine(self) -> list:  # noqa: N802
+        """Film grain's response as heights (edit.LINE) from black to white."""
+        points = self.grainCurve
+        return self._once("grainLine", lambda: edit.curve_line(points))
+
+    @Property("QVariantMap", constant=True)
+    def grains(self) -> dict:
+        """What film grain can be set to at one press: `characters` (an amount, a size and a
+        roughness each) and `responses` (the response curve's points)."""
+        return {"characters": edit.CHARACTERS, "responses": edit.RESPONSES}
+
+    @Property("QVariantList", notify=bwChanged)
+    def bw(self) -> list:
+        return self.history.edit.get("bw", edit.DEFAULTS["bw"])
 
     def _once(self, name: str, make):
         """`make()`, worked out once until the next change."""
@@ -558,12 +848,16 @@ class Session(QObject):
 
     @Slot("QVariant")
     def open(self, files) -> None:
-        """Files chosen in the dialog or dropped on the window (URLs or paths)."""
+        """Files chosen in the dialog or dropped on the window (URLs or paths). A .cube among
+        them is a LUT for the open photo, not a photo."""
         paths = [Path(QUrl(f).toLocalFile() if "://" in str(f) else str(f)) for f in
                  (f.toString() if isinstance(f, QUrl) else f for f in files)]
         paths = [p for p in paths if p.is_file()]
         if not paths:
             return self.say("None of these files could be found.")
+        tables = [p for p in paths if p.suffix.lower() == ".cube"]
+        if tables:
+            return [self.importLut(str(table)) for table in tables] and None
         self.photos = paths
         self._relisted()
         self._show(0)
@@ -646,10 +940,8 @@ class Session(QObject):
         generation, index, size = address.split("/")
         blank = QImage(*self.BLANK, QImage.Format.Format_RGBA16FPx4)
         blank.fill(0)
-        if generation == "painted":
-            return self._painted_at(index) or blank
-        if generation == "export":  # the photo an export is being made of (photone/export.py)
-            return self.exporter.picture if self.exporter and self.exporter.picture else blank
+        if generation in ("painted", "lut", "export"):
+            return self._other(generation, index) or blank
         if int(generation) != self._generation:
             return blank  # a photo the user has already left: not worth decoding
         if index == "chart":  # the test chart in the photo's place: no file, nothing to describe
@@ -666,6 +958,15 @@ class Session(QObject):
         if size == "half":
             self._small = (int(generation), small)
         return picture
+
+    def _other(self, kind: str, which: str) -> QImage | None:
+        """A picture that is not the open photo's own: its painted masks, a LUT, or the photo
+        an export is being made of (photone/export.py)."""
+        if kind == "painted":
+            return self._painted_at(which)
+        if kind == "lut":
+            return self._lut_at(which)
+        return self.exporter.picture if self.exporter else None
 
     def _painted_at(self, which: str) -> QImage | None:
         """The painted masks of the photo on show, or of the one being exported."""
@@ -763,7 +1064,7 @@ class Session(QObject):
         """The shader's numbers for an edit of the photo on show."""
         wide, high = self._stored_size()
         numbers = edit.uniforms(shown, self._camera, self._raw, self.peak if self.hdr else 1.0,
-                                wide / max(1, high))
+                                wide / max(1, high), wide)
         return shaders.for_qml({**numbers, "frame": self._frame()["matrix"]})
 
     def _layers(self, frame: list | None = None) -> list:
@@ -854,6 +1155,18 @@ class Session(QObject):
         points = self.history.edit.get("eq", [])
         return self._once("eqLine", lambda: [edit.eq_at(points, hue) for hue in range(0, 361, 2)])
 
+    @Property("QVariantList", notify=bwChanged)
+    def bwLine(self) -> list:  # noqa: N802
+        """The B&W EQ as percent lighter at every other degree of hue, 0 to 360."""
+        points = self.bw
+        return self._once("bwLine", lambda: [edit.bw_at(points, hue) * 100 - 100
+                                             for hue in range(0, 361, 2)])
+
+    @Property("QVariantMap", constant=True)
+    def films(self) -> dict:
+        """The film looks to start black and white from: each a set of the B&W EQ's points."""
+        return edit.FILMS
+
     @Property("QVariantList", constant=True)
     def hues(self) -> list:
         """The hues round the wheel as colors: the color EQ's strip."""
@@ -923,6 +1236,29 @@ class Session(QObject):
         self.history.replace({})
         self._edited()
 
+    @Slot("QVariantMap")
+    @Slot("QVariantMap", "QVariantList")
+    def pasteLook(self, look: dict, parts=None) -> None:  # noqa: N802
+        """Lay a look (edit.look_of) on the open photo, all of it or those parts of it, as one
+        step of undo: its frame and its masks stay."""
+        if self.photos:
+            self.history.replace(edit.with_look(self.history.edit, look, parts))
+            self._edited()
+
+    @Slot("QVariantMap", "QVariantList", result="QVariantMap")
+    def numbersWith(self, look: dict, parts: list) -> dict:  # noqa: N802
+        """The shader's numbers for the open photo with that look laid on it: what a preset
+        would make of it, for its small picture."""
+        laid = edit.with_look(self.history.edit, look, parts)
+        if laid.get("luts") != self.history.edit.get("luts"):
+            laid.pop("luts", None)  # (other LUTs than the photo's: no picture of them here)
+        return self._numbers(laid)
+
+    @Property("QVariantMap", notify=changed)
+    def look(self) -> dict:
+        """The open photo's look as it stands (edit.look_of): what a preset is saved from."""
+        return edit.look_of(self.history.edit)
+
     @Property("QVariantMap", notify=changed)
     def adjusted(self) -> dict:
         """For each tool, whether any of its settings is off its rest: the dot on its icon."""
@@ -946,7 +1282,7 @@ class Session(QObject):
 
     @Property("QVariantMap", notify=changed)
     def panels(self) -> dict:
-        """What is open: `tool` (the docked panel, or ""), `histogram`, `clipping`; `live`: the
+        """What is open: `tool` ("crop" while the Crop tab is, or ""), `clipping`; `live`: the
         wheel shows the photo's colors after the pins, not before them; and `chart`: a test
         chart stands in the photo's place, with the photo's edit on it."""
         return self._panels
@@ -1496,7 +1832,8 @@ def choose_surface(platform: str) -> None:
     os.environ.update(surface_environment(platform, vulkan_works(), dict(os.environ)))
 
 
-def make_view(session: Session, library: Library | None = None) -> QQuickView:
+def make_view(session: Session, library: Library | None = None,
+              presets: Presets | None = None) -> QQuickView:
     # Qt gathers small pictures into one shared texture, an "atlas", which is 8-bit: a photo
     # under about a thousand pixels across lost its floats there (coarse shadows, nothing
     # above white). No picture of ours may go in. scripts/shots.py checks what it guards.
@@ -1509,17 +1846,17 @@ def make_view(session: Session, library: Library | None = None) -> QQuickView:
     library = library or Library(None)  # (none: an empty one, as in most checks)
     session.exporter = Exporter(session, view)
     view.engine().addImageProvider("photo", PhotoProvider(session))
-    session.setParent(view)  # so it outlives the interface that reads it, also at exit
-    library.setParent(view)
+    presets = presets or Presets()  # (none: kept nowhere, as in the checks)
     context = view.rootContext()
-    context.setContextProperty("session", session)
-    context.setContextProperty("library", library)
-    context.setContextProperty("exporter", session.exporter)
-    # (The Edit screen as it was before M16, for the audits that have not followed yet:
-    # PHOTONE_TRIAL=old. Goes with them.)
+    # What is not ready for everyone yet, by name: PHOTONE_TRIAL=presets (several: commas).
     context.setContextProperty("trial", os.environ.get("PHOTONE_TRIAL", ""))
-    context.setContextProperty("cursors", TurnCursors(view))
-    context.setContextProperty("usage", Usage(view))
+    # (The first three are the view's own from here: they outlive the interface that reads
+    # them, also at exit.)
+    for name, thing in (("session", session), ("library", library), ("presets", presets),
+                        ("exporter", session.exporter), ("cursors", TurnCursors(view)),
+                        ("usage", Usage(view))):
+        thing.setParent(view)
+        context.setContextProperty(name, thing)
     for name, file in (("pipelineShader", "pipeline.frag"), ("pipelineVertex", "pipeline.vert"),
                        ("wheelShader", "wheel.frag"), ("wheelVertex", "wheel.vert"),
                        ("ovalShader", "oval.frag"), ("ovalVertex", "oval.vert"),

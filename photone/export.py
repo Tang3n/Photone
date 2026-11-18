@@ -19,14 +19,28 @@ from PySide6.QtCore import Property, QBuffer, QObject, QSize, Qt, QUrl, Signal, 
 from PySide6.QtGui import QColorSpace, QImage, QImageWriter
 from PySide6.QtQuick import QQuickItem
 
-from photone import decode, edit, shaders
+from photone import decode, edit, lut, shaders
 from photone.catalog import identify
 
 # What can be written: the file's ending, what Qt calls the format, and how many bits a color has.
 FORMATS = {"jpeg": (".jpg", b"jpeg", 8), "png8": (".png", b"png", 8),
            "png16": (".png", b"png", 16), "tiff16": (".tif", b"tiff", 16)}
+TABLE = 65   # points a side of a look written out as a .cube file
 RECENT = 12  # how many of the last exported files are kept to show
 TILE = 2048  # a tile's side: small enough for any GPU, and for a window of the checks
+
+
+def lattice() -> QImage:
+    """A picture of every color of a table of TABLE points a side (lut.atlas of the table that
+    changes nothing), as decode.py hands over a PNG: linear Rec.2020 half floats."""
+    side = TABLE * TABLE
+    colors = np.rint(lut.atlas(lut.identity(TABLE)).astype(np.float64) * 65535).astype(np.uint16)
+    image = QImage(colors.tobytes(), side, TABLE, side * 8, QImage.Format.Format_RGBA64).copy()
+    image.setColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgb))
+    image.convertTo(QImage.Format.Format_RGBA16FPx4)
+    image.convertToColorSpace(QColorSpace(QColorSpace.Primaries.Bt2020,
+                                          QColorSpace.TransferFunction.Linear))
+    return image
 
 
 class Failed(Exception):
@@ -235,6 +249,34 @@ class Exporter(QObject):
         self._last = str(folder)
         self._next()
 
+    @Slot(str)
+    def startTable(self, file: str) -> None:  # noqa: N802
+        """Write the open photo's look as a .cube file of TABLE points a side: what the look
+        makes of every color of a finished picture, found by sending a picture of all the
+        table's colors down the same road as a photo to be exported. Without what a table
+        cannot hold: the crop, the masks and their pins, the grain, and what goes by a
+        pixel's neighbors (sharpening, noise reduction, the lens)."""
+        path = Path(QUrl(file).toLocalFile() if "://" in file else file).with_suffix(".cube")
+        if self.running or not self.session.photos:
+            return
+        if not path.parent.is_dir():
+            self._failures = [f"There is no folder {path.parent} to write to."]
+            return self.changed.emit()
+        # (Nor what goes by a pixel's neighbors, which in this picture are other colors of the
+        # table and no neighbors: sharpening, noise reduction and the lens, switched off.)
+        parts = [part for part in edit.PARTS if part not in ("grain", "detail", "lens")]
+        look = {**edit.look_of(self.session.history.edit, parts), "sharpen": 0.0, "denoise": 0.0,
+                "denoiseColor": 0.0}
+        image = lattice()
+        self._table = look
+        self._photo, self._busy = path, True
+        self._total, self._finished, self._failures = 1, 0, []
+        self.changed.emit()
+        meta = {"camera": None, "raw": False, "width": TABLE * TABLE, "height": TABLE}
+        self._decoded((self._run, (meta, image)))
+
+    _table: dict | None = None  # the look whose table is being written, while it is
+
     @Slot()
     def stop(self) -> None:
         """Stop now: the photos still waiting are not exported, and the one under way is
@@ -245,11 +287,11 @@ class Exporter(QObject):
         self._run += 1
         self._serial += 1
         self.queue, self._total, self._busy = [], self._finished, False
-        self._job, self._grabs, self.picture, self.painted = {}, [], None, None
+        self._job, self._grabs, self.picture, self.painted, self._table = {}, [], None, None, None
         self.changed.emit()
 
     def _next(self) -> None:
-        self._job, self._grabs, self.picture, self.painted = {}, [], None, None
+        self._job, self._grabs, self.picture, self.painted, self._table = {}, [], None, None, None
         if self.queue:
             self._busy, self._photo = True, self.queue.pop(0)
             threading.Thread(target=self._decode, args=(self._photo, self._run),
@@ -271,7 +313,10 @@ class Exporter(QObject):
         self.decoded.emit((run, (meta, image)))
 
     def _edit_of(self, photo: Path) -> dict:
-        """The photo's edit: the open one's as it stands, any other's from the catalog."""
+        """The photo's edit: the open one's as it stands, any other's from the catalog. (Or,
+        for a look's table, that look.)"""
+        if self._table is not None:
+            return self._table
         if self.session.path == str(photo):
             return dict(self.session.history.edit)
         kept = self.session.catalog
@@ -290,22 +335,28 @@ class Exporter(QObject):
         stored = self._edit_of(self._photo)
         frame = edit.frame(stored, meta["width"], meta["height"])  # its turns, angle and crop
         shape = meta["width"] / max(1, meta["height"])
-        numbers = {**edit.uniforms(stored, camera, meta["raw"], shape=shape),
+        sized = {"shape": shape, "wide": meta["width"]}
+        numbers = {**edit.uniforms(stored, camera, meta["raw"], **sized),
                    "frame": frame["matrix"]}
         # (What its masks change inside them: the picture once more for each, edit.layers.)
         inside = [{"mask": n, "numbers": shaders.for_qml(
-            {**edit.uniforms(local, camera, meta["raw"], shape=shape), "frame": frame["matrix"]})}
+            {**edit.uniforms(local, camera, meta["raw"], **sized), "frame": frame["matrix"]})}
             for n, local in edit.layers(stored, camera)]
         self._serial += 1
         # (And its painted masks, as the picture the shader reads them from: not the open
         # photo's kept raster, which is another photo's or may be painted on meanwhile.)
         strokes = [m["strokes"] for m in stored.get("masks", []) if m["kind"] == "brush"]
         self.painted = self._painted(strokes, shape) if strokes else None
-        deep = FORMATS[self.options["kind"]][2] == 16
+        deep = self._table is not None or FORMATS[self.options["kind"]][2] == 16
+        tables = stored.get("luts")
         wide, high = frame["size"]
         self._job = {"source": f"image://photo/export/{self._serial}/full", "width": wide,
                      "height": high, "uniforms": shaders.for_qml(numbers), "layers": inside,
                      "painted": f"image://photo/painted/export/{self._serial}" if strokes else "",
+                     "lut": f"image://photo/lut/{lut.address(tables)}/export" if tables else "",
+                     # (A look's table: each color of it read by itself, not mixed with its
+                     # neighbor's as a photo's pixels are, however little.)
+                     "exact": self._table is not None,
                      "tiles": tiles(wide, high, deep, self.side, len(inside))}
         self.changed.emit()
 
@@ -347,16 +398,24 @@ class Exporter(QObject):
         if not self._job:
             return  # (stopped meanwhile)
         job, grabs, self._busy = self._job, self._grabs, True
-        self._job, self._grabs, self.picture, self.painted = {}, [], None, None
+        options = {**self.options, "table": self._table is not None}
+        self._job, self._grabs, self.picture, self.painted, self._table = {}, [], None, None, None
         self.changed.emit()
         threading.Thread(target=self._write, daemon=True,
-                         args=(self._photo, job, grabs, dict(self.options), self._run)).start()
+                         args=(self._photo, job, grabs, options, self._run)).start()
 
     def _write(self, photo: Path, job: dict, grabs: list, options: dict, run: int) -> None:  # noqa: PLR0913
         """On a thread: put the tiles together and write the file."""
         if len(grabs) != len(job.get("tiles", [None])):
             return self.written.emit(f"{photo.name} could not be rendered.", "", run)
         try:
+            if options["table"]:  # a look's table: the colors that came back, as a .cube file
+                flat = assembled(job, grabs).astype(np.float64) / 65535
+                table = flat.reshape(TABLE, TABLE, TABLE, 3).transpose(1, 0, 2, 3)
+                part = photo.with_name(photo.name + ".part")
+                part.write_text(lut.cube(table, photo.stem), "utf-8")
+                os.replace(part, photo)
+                return self.written.emit("", "", run)
             image = picture(assembled(job, grabs), int(options["longest"]))
             if run != self._run:
                 return None

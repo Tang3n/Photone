@@ -73,9 +73,9 @@ def quit_on_ctrl_c(application) -> None:
     awake.start()
 
 
-def show(ui, session, library):
+def show(ui, session, library, presets=None):
     try:
-        view = ui.make_view(session, library)
+        view = ui.make_view(session, library, presets)
     except RuntimeError as e:
         sys.exit(f"photone: {e}")
     ui.watch_surface(view, session)
@@ -109,7 +109,10 @@ def main() -> None:
     session.say(trouble)
     session.ahead = workers.ahead
     library = ui.Library(kept, settings=settings)
-    view = show(ui, session, library)
+    # (Beside the catalog; with no catalog to write to, presets last as long as the program.)
+    presets = ui.Presets(kept.path.with_name("presets.json") if kept else None)
+    session.say(presets.error)
+    view = show(ui, session, library, presets)
     library.rescan()  # what is new in the library's folders, found while the window is up
     quit_on_ctrl_c(application)
     code = application.exec()

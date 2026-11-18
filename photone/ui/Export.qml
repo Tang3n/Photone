@@ -10,6 +10,7 @@ Rectangle {
     id: root
     property var picture: null   // the open photo's picture and its painted masks (PhotoView's)
     property var painted: null
+    property var lut: null   // the open photo's LUT as a picture (PhotoView.lut), or none
     property bool ready: false   // that picture is there
     signal folderAsked()
     signal editAsked(string photo)   // open that photo in Edit
@@ -70,7 +71,7 @@ Rectangle {
             readonly property real fit: Math.min(stand.width / Math.max(1, session.fullWidth), stand.height / Math.max(1, session.fullHeight))
             width: Math.round(session.fullWidth * fit); height: Math.round(session.fullHeight * fit)
             anchors.centerIn: parent
-            source: root.picture; painted: root.painted || root.picture
+            source: root.picture; painted: root.painted || root.picture; lutPicture: root.lut
             Local { over: shot; layers: session.maskLayers }
         }
         GridView {

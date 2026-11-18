@@ -223,12 +223,13 @@ Rectangle {
     // moves the photo's colors moves the dots in the same frame.
     property var picture                    // the photo's first picture (an Image)
     property var painted                    // and its painted masks' (PhotoView.painted)
+    property var lut: null                  // and its LUT's (PhotoView.lut), or none
     readonly property int side: 127         // dots across and down: one for each pixel of that render
     Pipeline {
         id: numbers
         objectName: "wheel-colors"
         width: root.side; height: root.side; visible: false
-        source: root.picture; sharp: root.picture; useSharp: 0; painted: root.painted || root.picture
+        source: root.picture; sharp: root.picture; useSharp: 0; painted: root.painted || root.picture; lutPicture: root.lut
         edit: session.inFrame
         scope: session.panels.live ? 9 : 8   // after everything, or before the pins
         peak: 1; hdrLift: 0; linearOut: 0; clipping: 0

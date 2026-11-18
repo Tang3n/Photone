@@ -12,21 +12,72 @@ from itertools import pairwise
 
 import numpy as np
 
+from photone import lens, lut
+
 # None for the white balance means "as the camera shot it", which differs per photo; and None
 # for the exposure "where this photo starts": as shot, or lighter where the picture has room
 # (`exposure_of`).
 STRAIGHT = [[0.0, 0.0], [1.0, 1.0]]  # the tone curve that changes nothing
+# Black and white. A film look is a set of points of the B&W EQ and nothing else: around
+# `hue` (degrees on the wheel: 30 red, 60 orange, 105 yellow, 145 green, 200 cyan, 262 blue,
+# 330 magenta) colors become `gain` percent lighter (darker below 0), less and less out to
+# `width` degrees (a bell, as the color EQ's points; where two reach the same hue they add
+# up). The filters do what a colored glass before the lens does to film: its own color
+# lighter, the opposite one darker. Few points and wide ones: a look that changes much within
+# a few degrees of hue turns the noise of a photo's colors into speckle. Chosen by eye, not
+# measured on film.
+def _film(*points) -> list[dict]:
+    return [{"hue": float(h), "gain": float(g), "width": float(w)} for h, g, w in points]
+
+
+FILMS = {"none": [],
+         "panchromatic": _film((40, 5, 90), (105, 6, 70), (262, -10, 100)),
+         "red": _film((35, 28, 100), (160, -14, 80), (250, -34, 110)),
+         "orange": _film((50, 20, 90), (120, 4, 60), (250, -24, 110)),
+         "yellow": _film((95, 14, 90), (250, -14, 110)),
+         "green": _film((140, 18, 90), (20, -12, 90), (275, -10, 90)),
+         "orthochromatic": _film((35, -30, 90), (140, 6, 80), (250, 18, 110))}
+# Film grain. How strong it is from black (left) to white, 0..1, is a curve as the tone
+# curve is one; a response is a set of its points: Print, strongest in the middle tones and
+# gone at black and white, as on a print; Negative, strongest in the shadows; Even. A
+# character is an amount, a size and a roughness (a film's speed, as a look).
+RESPONSES = {"print": [[0.0, 0.0], [0.5, 1.0], [1.0, 0.0]],
+             "negative": [[0.0, 0.55], [0.3, 1.0], [1.0, 0.15]],
+             "even": [[0.0, 1.0], [1.0, 1.0]]}
+CHARACTERS = {"fine": {"grain": 20.0, "grainSize": 0.6, "grainRough": 30.0},
+              "classic": {"grain": 35.0, "grainSize": 1.0, "grainRough": 50.0},
+              "bold": {"grain": 55.0, "grainSize": 1.6, "grainRough": 65.0},
+              "pushed": {"grain": 75.0, "grainSize": 2.3, "grainRough": 85.0}}
+GRAINS = 4000.0  # grains along the picture's longer side at size 1: 1.75 pixels each at 33 MP
 DEFAULTS = {"profile": "standard", "temperature": None, "tint": None,
             "exposure": None, "contrast": 0.0, "brightness": 0.0, "highlights": 0.0,
             "midtones": 0.0, "shadows": 0.0, "whites": 0.0, "blacks": 0.0, "curve": STRAIGHT,
             "pins": [],
             "saturation": 100.0, "vibrance": 0.0, "chroma": STRAIGHT, "eq": [],
+            "mono": False, "bw": FILMS["panchromatic"],
+            "luts": [],
+            # (What a photo starts with of Detail is the owner's, set by eye on his photos: "these
+            # as defaults would be good". At 0 a setting is switched off, and kept as that.)
+            "sharpen": 20.0, "sharpenRadius": 1.0, "sharpenMask": 0.0,
+            "denoise": 10.0, "denoiseColor": 10.0,
+            # (On until switched off, where the file has the camera's figures: the owner's
+            # choice, "i think all should be switched on by default".)
+            "lensDistortion": True, "lensColor": True, "lensVignetting": True,
+            "caRed": 0.0, "caBlue": 0.0, "defringePurple": 0.0, "defringeGreen": 0.0,
+            "grain": 0.0, "grainSize": 1.0, "grainRough": 50.0, "grainColor": 0.0,
+            "grainCurve": RESPONSES["print"],
             "turns": 0.0, "angle": 0.0, "crop": [0.0, 0.0, 1.0, 1.0], "masks": []}
 RANGES = {"temperature": (2000.0, 15000.0), "tint": (-150.0, 150.0), "exposure": (-5.0, 5.0),
           "contrast": (-100.0, 100.0), "brightness": (-100.0, 100.0),
           "highlights": (-100.0, 100.0), "midtones": (-100.0, 100.0), "shadows": (-100.0, 100.0),
           "whites": (-100.0, 100.0), "blacks": (-100.0, 100.0), "vibrance": (-100.0, 100.0),
-          "saturation": (0.0, 200.0), "turns": (0.0, 3.0), "angle": (-15.0, 15.0)}
+          "saturation": (0.0, 200.0), "turns": (0.0, 3.0), "angle": (-15.0, 15.0),
+          "sharpen": (0.0, 150.0), "sharpenRadius": (0.5, 3.0), "sharpenMask": (0.0, 100.0),
+          "denoise": (0.0, 100.0), "denoiseColor": (0.0, 100.0),
+          "caRed": (-100.0, 100.0), "caBlue": (-100.0, 100.0),
+          "defringePurple": (0.0, 100.0), "defringeGreen": (0.0, 100.0),
+          "grain": (0.0, 100.0), "grainSize": (0.4, 4.0), "grainRough": (0.0, 100.0),
+          "grainColor": (0.0, 100.0)}
 # The photo's frame: quarter turns to the right, an angle (degrees) that turns the picture to
 # the right inside its frame to straighten it, and the crop, [left, top, right, bottom] of the
 # picture as it stands after the turns, 0..1. They are what stays when the original is shown.
@@ -34,9 +85,15 @@ FRAME = ("turns", "angle", "crop")
 # The tools of the rail and the settings each one owns: what its dot, its reset and its
 # "compare" are about.
 TOOLS = {"tone": ("profile", "exposure", "contrast", "brightness", "highlights", "midtones",
-                  "shadows", "whites", "blacks"),
-         "curve": ("curve",), "balance": ("temperature", "tint"), "pins": ("pins", "masks"),
+                  "shadows", "whites", "blacks", "curve"),
+         "balance": ("temperature", "tint"), "pins": ("pins", "masks"),
          "saturation": ("saturation", "vibrance"), "eq": ("eq",), "chroma": ("chroma",),
+         "grain": ("grain", "grainSize", "grainRough", "grainColor", "grainCurve"),
+         "lut": ("luts",),
+         "detail": ("sharpen", "sharpenRadius", "sharpenMask", "denoise", "denoiseColor"),
+         "lens": ("lensDistortion", "lensColor", "lensVignetting", "caRed", "caBlue",
+                  "defringePurple", "defringeGreen"),
+         "mono": ("bw",),  # (the look; black and white itself is a switch, no tool's setting)
          "crop": FRAME}
 POINTS = 16     # of a tone curve: what the shader's three matrices hold
 GAP = 0.01      # the least two neighboring curve points are apart, left to right
@@ -92,9 +149,11 @@ NEUTRAL = 0.02  # a source color with less chroma than this has no hue to turn: 
 VIVID = 0.4     # the chroma at the right end of the chroma curve
 BANDS = 8       # points a color EQ can have: what the shader's two matrices hold
 # A point of the color EQ: around `hue` (degrees on the wheel: 0 red, 90 yellow, 140 green, 260
-# blue), colors get `gain` percent of their chroma; in full within half of `width` degrees to
-# either side, not at all beyond `width`.
+# blue), colors get `gain` percent of their chroma: in full at that hue, half of it at half of
+# `width` degrees to either side, not at all beyond `width` (`_bell`).
 BAND_RANGES = {"hue": (0.0, 360.0), "gain": (0.0, 200.0), "width": (8.0, 120.0)}
+BW_RANGES = {**BAND_RANGES, "gain": (-40.0, 40.0)}  # a point of the B&W EQ: percent lighter
+TINTED = 0.04   # the chroma at which the B&W EQ does half of what it says: a gray has no hue
 BAND = 0.05     # how softly a pin's span of lightness ends
 
 # A profile is the base tone curve from what the sensor measured to a picture: its contrast,
@@ -142,6 +201,38 @@ def _ranged(key: str, value) -> float:
         raise ValueError(f"{key} must be a number")
     low, high = RANGES[key]
     return min(high, max(low, float(value)))
+
+
+def valid_mono(value) -> bool:
+    """A switch (black and white, a lens correction): on or off."""
+    if not isinstance(value, bool):
+        raise ValueError("a switch is on or off")
+    return value
+
+
+LUTS = 16       # LUTs a photo can have: what four of the shader's matrices hold
+
+
+def valid_luts(value) -> list[dict]:
+    """The LUTs laid on a photo, in the order they are laid on."""
+    if not isinstance(value, (list, tuple)) or len(value) > LUTS:
+        raise ValueError(f"at most {LUTS} LUTs")
+    return [valid_lut(given) for given in value]
+
+
+def valid_lut(value) -> dict:
+    """One LUT of a photo: which of those installed (`id`: what its file is kept under, of
+    letters and digits only: it becomes part of a path), its name, how many points a side
+    it has, how much of it is laid on, in percent, and `off` while it is switched off."""
+    if not (isinstance(value, dict) and isinstance(value.get("id"), str) and value["id"].isalnum()
+            and len(value["id"]) <= 64 and isinstance(value.get("name"), str)
+            and _number(value.get("size")) and _number(value.get("strength", 100.0))):
+        raise ValueError("a LUT is an id, a name, a size and a strength")
+    if not 2 <= value["size"] <= 65 or value["size"] != int(value["size"]):
+        raise ValueError("a LUT has 2 to 65 points a side")
+    out = {"id": value["id"], "name": value["name"][:80], "size": int(value["size"]),
+           "strength": min(100.0, max(0.0, float(value.get("strength", 100.0))))}
+    return {**out, "off": True} if value.get("off") is True else out
 
 
 def valid_profile(value) -> str:
@@ -434,29 +525,35 @@ def valid_crop(value) -> list[float]:
     return [left, top, right, bottom]
 
 
-def valid_eq(value) -> list[dict]:
-    """The color EQ's points as the edit keeps them: each a hue, a gain and a width."""
+def valid_eq(value, ranges=BAND_RANGES) -> list[dict]:
+    """The points of the color EQ (or, with its ranges, of the B&W EQ) as the edit keeps
+    them: each a hue, a gain and a width."""
     if not isinstance(value, (list, tuple)) or len(value) > BANDS:
         raise ValueError(f"at most {BANDS} points")
     points = []
     for given in value:
-        if not isinstance(given, dict) or not all(_number(given.get(key)) for key in BAND_RANGES):
-            raise ValueError("a point of the color EQ is a hue, a gain and a width")
+        if not isinstance(given, dict) or not all(_number(given.get(key)) for key in ranges):
+            raise ValueError("a point of an EQ is a hue, a gain and a width")
         point = {key: round(min(high, max(low, float(given[key]))), 3)
-                 for key, (low, high) in BAND_RANGES.items()}
+                 for key, (low, high) in ranges.items()}
         point["hue"] = round(float(given["hue"]) % 360, 3)  # once round the wheel is the same hue
         points.append(point)
     return points
 
 
 SHAPES = {"profile": valid_profile, "curve": valid_curve, "chroma": valid_curve,
+          "grainCurve": valid_curve, "luts": valid_luts,
           "pins": valid_pins, "eq": valid_eq, "crop": valid_crop, "masks": valid_masks,
+          "mono": valid_mono, "bw": lambda value: valid_eq(value, BW_RANGES),
+          "lensDistortion": valid_mono, "lensColor": valid_mono, "lensVignetting": valid_mono,
           "turns": lambda value: float(round(_ranged("turns", value)) % 4)}
 
 
 def clean(values) -> dict:
     """An edit read from somewhere untrusted: only what is known and valid, and not default."""
     out = {}
+    if isinstance(values, dict) and "lut" in values and "luts" not in values:
+        values = {**values, "luts": [values["lut"]]}  # (a photo had one LUT, for a day)
     for key, value in (values.items() if isinstance(values, dict) else ()):
         try:
             value = valid(key, value)
@@ -739,6 +836,35 @@ def curve_uniforms(points: list[list[float]]) -> dict:
             "curveM": slope + [0.0] * fill}
 
 
+def luts_uniforms(luts: list[dict]) -> dict:
+    """A photo's LUTs for the shader, four to a matrix, one of four numbers each: how many
+    points a side, how much of it is laid on (none while it is off), and the row its slices
+    begin at in the picture they are all read from (photone/lut.py: `stacked` one under the
+    other, in the order of `bands`)."""
+    rows, tops = [], lut.bands(luts)
+    for one in luts:
+        much = 0.0 if one.get("off") else one["strength"] / 100
+        rows += [float(one["size"]), much, float(tops[one["id"], one["size"]]), 0.0]
+    rows += [0.0] * (LUTS * 4 - len(rows))
+    return {"lutCount": float(len(luts)),
+            **{f"luts{letter}": rows[16 * n:16 * n + 16] for n, letter in enumerate("ABCD")}}
+
+
+def grain_uniforms(full: dict, shape: float) -> dict:
+    """Film grain for the shader: `grain` is how far the lightest and darkest grains are from
+    the picture's own lightness (OKLab, at the response's full strength; 100 is 0.15 either
+    way); `grainWide` and `grainHigh` how many grains lie across and down the stored picture
+    (whose width over height is `shape`); the response curve as the tone curve is handed
+    over. Not colored for a black and white photo."""
+    along, shape = GRAINS / full["grainSize"], shape if shape > 0 else 1.0  # (no photo yet: 0)
+    curve = curve_uniforms(full["grainCurve"])
+    return {"grain": full["grain"] / 100 * 0.3,
+            "grainWide": along * min(1.0, shape), "grainHigh": along * min(1.0, 1 / shape),
+            "grainRough": full["grainRough"] / 100,
+            "grainColor": 0.0 if full["mono"] else full["grainColor"] / 100,
+            **{f"grain{name[5:]}": curve[name] for name in ("curveX", "curveY", "curveM")}}
+
+
 # ---- color pins ------------------------------------------------------------------------------
 
 def _turned(color: np.ndarray, angle: float) -> np.ndarray:
@@ -836,15 +962,38 @@ def _shield(pins: list[dict], lab, masked=None) -> float:
                 for pin in pins if pin["mode"] == "protect"), default=0.0)
 
 
+def _bell(x: float) -> float:
+    """An EQ point's weight that far from its hue, in widths: all of it at the hue itself,
+    half at half the width, nothing from the width on, and no corner anywhere. (It was a
+    flat top with steep sides: colors a few degrees apart, as the noise of a photo makes
+    them, were then treated very differently, which showed as speckle; the owner saw it.)"""
+    return 0.5 + 0.5 * math.cos(math.pi * min(abs(x), 1.0))
+
+
 def eq_at(points: list[dict], hue: float) -> float:
     """What the color EQ makes of the chroma of a color of that hue (degrees): times this."""
     gain = 1.0
     for point in points:
         apart = abs((hue - point["hue"] + 180) % 360 - 180)
-        gain += (1 - _step(point["width"] / 2, point["width"], apart)) * (point["gain"] / 100 - 1)
+        gain += _bell(apart / point["width"]) * (point["gain"] / 100 - 1)
     # (A plain number: as one of numpy's the interface could not read it, and the EQ's line
     # was not drawn once it had a point.)
     return float(max(0.0, gain))
+
+
+def bw_at(points: list[dict], hue: float) -> float:
+    """What the B&W EQ makes of the lightness of a vivid color of that hue (degrees): times
+    this. The color EQ's own sum, a point's gain being percent lighter."""
+    return eq_at([{**point, "gain": 100 + point["gain"]} for point in points], hue)
+
+
+def mono_at(points: list[dict], lab) -> np.ndarray:
+    """A color (lightness, a, b) as black and white: its own lightness, made lighter or
+    darker by the B&W EQ for its hue, the less the nearer it is to gray (half at TINTED)."""
+    chroma = math.hypot(lab[1], lab[2])
+    hue = math.degrees(math.atan2(lab[2], lab[1]))
+    share = chroma / (chroma + TINTED)
+    return np.array([lab[0] * (1 + (bw_at(points, hue) - 1) * share), 0.0, 0.0])
 
 
 def chroma_at(points: list[list[float]], chroma: float) -> float:
@@ -871,6 +1020,8 @@ def colors_at(edit: dict, lab, place=None, shape: float = 1.0) -> np.ndarray:
     the stored picture the pixel is (0..1), which the masks go by; `shape`: its width over its
     height."""
     full = {**DEFAULTS, **edit}
+    if full["mono"]:  # black and white: in the color tools' place
+        return mono_at(full["bw"], lab)
     masked = None if place is None else [mask_weight(m, place, shape) for m in full["masks"]]
     shield = _shield(full["pins"], lab, masked)
     out = pins_at(full["pins"], lab, masked)
@@ -887,7 +1038,11 @@ def colors_at(edit: dict, lab, place=None, shape: float = 1.0) -> np.ndarray:
 
 def look_uniforms(full: dict) -> dict:
     """Saturation, the chroma curve and the color EQ for the shader; and `look`: whether
-    anything at all is done to colors after the tone curve."""
+    anything at all is done to colors after the tone curve. Black and white (`mono`) takes
+    their place: the color tools at rest, and the B&W EQ's points where the color EQ's are."""
+    if full["mono"]:
+        points = [{**point, "gain": 100 + point["gain"]} for point in full["bw"]]
+        return {**look_uniforms({**DEFAULTS, "eq": points}), "look": 1.0, "mono": 1.0}
     slope = slopes(full["chroma"])
     fill = POINTS - len(full["chroma"])
     bands = []
@@ -896,7 +1051,7 @@ def look_uniforms(full: dict) -> dict:
     bands += [0.0] * (BANDS * 4 - len(bands))
     plain = (full["saturation"] == 100 and full["vibrance"] == 0
              and full["chroma"] == STRAIGHT and not full["eq"])
-    return {"look": 0.0 if plain and not full["pins"] else 1.0,
+    return {"look": 0.0 if plain and not full["pins"] else 1.0, "mono": 0.0,
             "saturation": full["saturation"] / 100, "vibrance": full["vibrance"] / 100,
             "chromaOn": 0.0 if full["chroma"] == STRAIGHT else 1.0,
             "chromaX": [p[0] for p in full["chroma"]] + [full["chroma"][-1][0]] * fill,
@@ -992,12 +1147,32 @@ def pins_uniforms(pins: list[dict]) -> dict:
     return out
 
 
-def uniforms(edit: dict, camera: dict | None, raw: bool, white: float = 1.0,
-             shape: float = 1.0) -> dict:
+def detail_uniforms(full: dict, shape: float, wide: int) -> dict:
+    """Sharpening and noise reduction for the shader, which reads each pixel with its
+    neighbors in the stored picture (`wide` pixels across, `shape` its width over its height)
+    and works in the square root of the light. `detailX`, `detailY`: one pixel of it as a
+    share of the picture. `sharpen`: how much of the difference from the neighbors is added
+    (100: all of it, once more); `sharpenRadius`: how far the neighbors are, in pixels;
+    `sharpenMask`: differences smaller than this are not sharpened (0.05 at 100). `denoise`,
+    `denoiseColor`: how far apart two pixels may be and still count as the same surface,
+    for their lightness (0.07 at 100, a third of that at 50: the low end is where a photo
+    taken in good light is set, and there a little is much) and for their color (0.25 at
+    100). Nothing of it without the picture's size."""
+    known = wide > 0 and shape > 0
+    return {"detailX": 1 / wide if known else 0.0, "detailY": shape / wide if known else 0.0,
+            "sharpen": full["sharpen"] / 100 if known else 0.0,
+            "sharpenRadius": full["sharpenRadius"], "sharpenMask": full["sharpenMask"] / 100 * 0.05,
+            "denoise": (full["denoise"] / 100) ** 1.5 * 0.07 if known else 0.0,
+            "denoiseColor": full["denoiseColor"] / 100 * 0.25 if known else 0.0}
+
+
+def uniforms(edit: dict, camera: dict | None, raw: bool, white: float = 1.0,  # noqa: PLR0913
+             shape: float = 1.0, wide: int = 0) -> dict:
     """Everything ui/pipeline.frag takes, as plain numbers (matrices as 3 rows of 3, the
     curve as lists of 16). `white` is how bright the sensor's white may be shown, in multiples
     of the display's white: 1 in SDR, the display's peak in HDR. `shape`: the stored picture's
-    width over its height, which the masks go by."""
+    width over its height, which the masks go by; `wide`: how many pixels it is across, which
+    sharpening and noise reduction go by."""
     full = {**DEFAULTS, **edit}
     to_cam, from_cam, wb = balance(full, camera)
     c, s, k = curve(full["profile"]) if raw else (0.0, 1.0, 1.0)  # 0: no curve
@@ -1017,10 +1192,22 @@ def uniforms(edit: dict, camera: dict | None, raw: bool, white: float = 1.0,
            "blacks": -math.copysign(0.03 * (full["blacks"] / 100) ** 2, full["blacks"]),
            "curveC": c, "curveS": s, "curveK": k,
            "hdrLift": max(0.0, white - 1) if raw else 0.0,
-           **curve_uniforms(full["curve"]), **pins_uniforms(full["pins"]), **look_uniforms(full),
+           **curve_uniforms(full["curve"]), **pins_uniforms([] if full["mono"] else full["pins"]),
+           **look_uniforms(full), **grain_uniforms(full, shape),
+           **luts_uniforms(full["luts"]), **detail_uniforms(full, shape, wide),
+           # Lens corrections, from the camera's own figures where the file had them.
+           **lens.tables((camera or {}).get("lens"), full["lensDistortion"], full["lensColor"],
+                         full["lensVignetting"], full["caRed"], full["caBlue"]),
+           "lensShape": shape if shape > 0 else 1.0,
+           # Fringes taken out by their color, at edges (the shader's `defringed`): how much.
+           "defringePurple": full["defringePurple"] / 100 if wide > 0 else 0.0,
+           "defringeGreen": full["defringeGreen"] / 100 if wide > 0 else 0.0,
            **masks_uniforms(full["masks"], shape), **over_uniforms(edit.get("over", {}))}
-    if out["chroma2On"] or out["eq2Count"]:
-        out["look"] = 1.0  # (a mask's own chroma curve or EQ is something done to colors too)
+    if full["mono"]:  # (a mask's own chroma curve and EQ have nothing to work on)
+        out["chroma2On"] = out["eq2Count"] = 0.0
+    if out["chroma2On"] or out["eq2Count"] or out["grain"]:
+        out["look"] = 1.0  # (a mask's own chroma curve or EQ is something done to colors too,
+        # and grain is laid on the color as OKLab has it)
     return out
 
 
@@ -1206,6 +1393,51 @@ class History:
             return False
         self.at = to
         return True
+
+
+# ---- a look ----------------------------------------------------------------------------------
+
+# What of an edit can go from one photo to another, in parts that can be chosen: everything
+# but the photo's frame and its masks (with their pins), which belong to that picture.
+# (The tone curve is in the Exposure card, and stays a part of its own here: saved looks name it.)
+PARTS = {"light": tuple(k for k in TOOLS["tone"] if k != "curve"), "curve": ("curve",),
+         "balance": TOOLS["balance"],
+         "color": ("luts", "pins", "saturation", "vibrance", "chroma", "eq"),
+         "mono": ("mono", "bw"), "detail": TOOLS["detail"], "lens": TOOLS["lens"],
+         "grain": TOOLS["grain"]}
+
+
+def _parts(parts) -> list[str]:
+    return [part for part in PARTS if parts is None or part in parts]
+
+
+def look_of(edit: dict, parts=None) -> dict:
+    """The look of an edit: its settings of those parts (all of them with None), cleaned. Of
+    the pins, the whole image's. What is at rest is not in it."""
+    full, out = clean(edit), {}
+    for part in _parts(parts):
+        for key in PARTS[part]:
+            if key in full:
+                out[key] = full[key]
+    if "pins" in out:
+        out["pins"] = [pin for pin in out["pins"] if not pin.get("mask")]
+        if not out["pins"]:
+            del out["pins"]
+    return out
+
+
+def with_look(edit: dict, look: dict, parts=None) -> dict:
+    """An edit with a look laid on it: those parts are the look's (at rest where the look
+    says nothing), the rest is as it was; the pins of the photo's own masks stay."""
+    look, out = look_of(look, parts), dict(clean(edit))
+    for part in _parts(parts):
+        for key in PARTS[part]:
+            out.pop(key, None)
+    own = [pin for pin in clean(edit).get("pins", []) if pin.get("mask")]
+    out.update(look)
+    if "color" in _parts(parts) and own:
+        out["pins"] = [*look.get("pins", []), *own][:PINS]
+    return clean(out)
 
 
 # ---- checkpoints ---------------------------------------------------------------------------

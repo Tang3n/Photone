@@ -6,15 +6,24 @@ import "."
 // Behind the line, how much of the photo has which hue. Press on the line to make a point, drag
 // it up or down (and along), scroll on it to make it reach more or fewer hues, double-click it
 // to take it away. Up to eight.
+// With `gray` it is the B&W EQ instead (the edit's `bw`): upward, how much lighter a color of
+// that hue becomes as a gray, from 40 % darker to 40 % lighter, nothing in the middle; and a
+// second strip under the hues shows the gray each of them becomes.
 Item {
     id: root
     signal done()                              // a gesture is over
+    property bool gray: false
+    readonly property string key: gray ? "bw" : "eq"
+    readonly property real low: gray ? -40 : 0     // a point's gain at the foot of the graph,
+    readonly property real high: gray ? 40 : 200   // at its head,
+    readonly property real rest: gray ? 0 : 100    // and where it changes nothing
     // For a mask (`mask`: its number): its own EQ, or until it has one the whole image's.
     property bool local: false   // a mask's card: named apart from the whole image's editor
     property int mask: 0
-    readonly property var points: mask > 0 ? (session.masks, session.localWhole(mask, "eq")) : session.eq
-    readonly property var line: mask > 0 ? (session.masks, session.localLine(mask, "eq")) : session.eqLine   // the gain at every other degree, 0..2
-    function put(list) { if (mask > 0) session.setMaskWhole(mask, "eq", list); else session.setEdit("eq", list) }
+    readonly property var points: mask > 0 ? (session.masks, session.localWhole(mask, "eq")) : gray ? session.bw : session.eq
+    // The gain at every other degree: 0..2 of the chroma, or (gray) percent lighter.
+    readonly property var line: mask > 0 ? (session.masks, session.localLine(mask, "eq")) : gray ? session.bwLine : session.eqLine
+    function put(list) { if (mask > 0) session.setMaskWhole(mask, "eq", list); else session.setEdit(key, list) }
     readonly property var bars: (session.bars.hue || [])   // heights 0..255
     readonly property var hues: session.hues             // the strip's colors, hue 0 to 360
     property int held: -1                      // the point being dragged
@@ -25,7 +34,7 @@ Item {
     readonly property real h: plot.height - 2 * inset
     readonly property int shown: held >= 0 ? held : hot
     function px(hue) { return inset + hue / 360 * w }
-    function py(gain) { return inset + (1 - gain / 200) * h }
+    function py(gain) { return inset + (1 - (gain - low) / (high - low)) * h }
     function within(v, low, high) { return Math.max(low, Math.min(high, v)) }
     function near(x, y) {
         for (let i = points.length - 1; i >= 0; i--)
@@ -41,33 +50,34 @@ Item {
     onBarsChanged: paint()
     onShownChanged: paint()
     onHuesChanged: strip.requestPaint()
+    onGrayChanged: { paint(); strip.requestPaint() }
     Timer { id: settled; interval: 500; onTriggered: session.commitEdit() }   // after the last notch of a wheel
 
     Canvas {
         id: plot
-        objectName: (root.local ? "local-" : "") + "eq-plot"
-        anchors { left: parent.left; right: parent.right; top: parent.top; bottom: parent.bottom; bottomMargin: 34 }
+        objectName: (root.local ? "local-" : "") + root.key + "-plot"
+        anchors { left: parent.left; right: parent.right; top: parent.top; bottom: parent.bottom; bottomMargin: root.gray ? 43 : 34 }
         onPaint: {
             const ctx = getContext("2d"), bars = root.bars, line = root.line
             ctx.reset()
             if (bars.length) {
                 ctx.fillStyle = Theme.raised
                 ctx.beginPath()
-                ctx.moveTo(root.px(0), root.py(0))
-                for (let i = 0; i < bars.length; i++) ctx.lineTo(root.px((i + 0.5) / bars.length * 360), root.py(bars[i] / 255 * 184))
-                ctx.lineTo(root.px(360), root.py(0))
+                ctx.moveTo(root.px(0), root.inset + root.h)
+                for (let i = 0; i < bars.length; i++) ctx.lineTo(root.px((i + 0.5) / bars.length * 360), root.inset + (1 - bars[i] / 255 * 0.92) * root.h)
+                ctx.lineTo(root.px(360), root.inset + root.h)
                 ctx.fill()
             }
             ctx.lineWidth = 1
             ctx.strokeStyle = Theme.line
             ctx.beginPath()
-            for (let q = 0; q <= 4; q++) { ctx.moveTo(root.px(0), Math.round(root.py(q * 50)) + 0.5); ctx.lineTo(root.px(360), Math.round(root.py(q * 50)) + 0.5) }
-            for (let q = 0; q <= 6; q++) { ctx.moveTo(Math.round(root.px(q * 60)) + 0.5, root.py(0)); ctx.lineTo(Math.round(root.px(q * 60)) + 0.5, root.py(200)) }
+            for (let q = 0; q <= 4; q++) { const y = Math.round(root.inset + q / 4 * root.h) + 0.5; ctx.moveTo(root.px(0), y); ctx.lineTo(root.px(360), y) }
+            for (let q = 0; q <= 6; q++) { ctx.moveTo(Math.round(root.px(q * 60)) + 0.5, root.inset); ctx.lineTo(Math.round(root.px(q * 60)) + 0.5, root.inset + root.h) }
             ctx.stroke()
             ctx.strokeStyle = Theme.text
             ctx.lineWidth = 1.6
             ctx.beginPath()
-            for (let i = 0; i < line.length; i++) ctx[i ? "lineTo" : "moveTo"](root.px(i * 360 / (line.length - 1)), root.py(line[i] * 100))
+            for (let i = 0; i < line.length; i++) ctx[i ? "lineTo" : "moveTo"](root.px(i * 360 / (line.length - 1)), root.py(root.gray ? line[i] : line[i] * 100))
             ctx.stroke()
             for (let i = 0; i < root.points.length; i++) {
                 const point = root.points[i]
@@ -91,7 +101,7 @@ Item {
                 let at = root.near(mouse.x, mouse.y)
                 if (at < 0 && list.length < 8) {
                     // A new point at that hue, changing nothing yet: it is a point once dragged.
-                    list.push({ hue: root.within((mouse.x - root.inset) / root.w * 360, 0, 359.9), gain: 100, width: 40 })
+                    list.push({ hue: root.within((mouse.x - root.inset) / root.w * 360, 0, 359.9), gain: root.rest, width: 40 })
                     at = list.length - 1
                 }
                 root.held = at
@@ -107,7 +117,7 @@ Item {
                 const list = root.base.map(point => Object.assign({}, point))
                 const point = list[root.held]
                 point.hue = (point.hue + (mouse.x - from.x) / root.w * 360 * fine + 360) % 360
-                point.gain = root.within(point.gain - (mouse.y - from.y) / root.h * 200 * fine, 0, 200)
+                point.gain = root.within(point.gain - (mouse.y - from.y) / root.h * (root.high - root.low) * fine, root.low, root.high)
                 root.put(list)
             }
             onReleased: (mouse) => {
@@ -138,7 +148,7 @@ Item {
     // rounded ends and a thin outline; the owner: "the same style as the one in tone wheel").
     Canvas {
         id: strip
-        objectName: (root.local ? "local-" : "") + "eq-strip"
+        objectName: (root.local ? "local-" : "") + root.key + "-strip"
         x: root.inset; y: plot.height + 4; width: root.w; height: 6
         onPaint: {
             const ctx = getContext("2d")
@@ -154,18 +164,44 @@ Item {
             ctx.stroke()
         }
     }
+    // The gray each hue becomes, under the hue itself: a vivid color of middle lightness,
+    // so that what the line does can be read off without the photo.
+    Canvas {
+        id: grays
+        objectName: "bw-grays"
+        visible: root.gray
+        x: root.inset; y: strip.y + strip.height + 3; width: root.w; height: 6
+        onVisibleChanged: requestPaint()
+        Connections { target: root; function onLineChanged() { if (grays.visible) grays.requestPaint() } }
+        onPaint: {
+            const ctx = getContext("2d"), line = root.line
+            ctx.reset()
+            if (!visible || !line.length) return
+            const run = ctx.createLinearGradient(0, 0, width, 0)
+            for (let i = 0; i < line.length; i += 3) {
+                const level = Math.max(0, Math.min(1, 0.5 * (1 + line[i] / 100)))
+                run.addColorStop(i / (line.length - 1), Qt.rgba(level, level, level, 1))
+            }
+            ctx.fillStyle = run
+            ctx.beginPath()
+            ctx.roundedRect(0, 0, width, height, height / 2, height / 2)
+            ctx.fill()
+            ctx.lineWidth = 1; ctx.strokeStyle = Theme.line
+            ctx.stroke()
+        }
+    }
     // (What to do, not what the graph means: it said "less color below the middle, more
     // above", which the owner found "terrible".)
     Label {
         anchors { left: parent.left; leftMargin: root.inset; right: parent.right; rightMargin: 120; bottom: parent.bottom }
         elide: Text.ElideRight; font.pixelSize: Theme.smallSize; color: Theme.faint
-        text: "Drag the line at a color: up strengthens it, down mutes it"
+        text: root.gray ? "Drag the line: up is lighter, down darker" : "Drag the line at a color: up strengthens it, down mutes it"
     }
     Label {
-        objectName: (root.local ? "local-" : "") + "eq-readout"
+        objectName: (root.local ? "local-" : "") + root.key + "-readout"
         anchors { right: parent.right; rightMargin: root.inset; bottom: parent.bottom }
         visible: root.shown >= 0 && root.shown < root.points.length
         font.pixelSize: Theme.smallSize; font.features: { "tnum": 1 }; color: Theme.text
-        text: visible ? Math.round(root.points[root.shown].hue) + "°   " + Math.round(root.points[root.shown].gain) + " %   ±" + Math.round(root.points[root.shown].width) + "°" : ""
+        text: visible ? Math.round(root.points[root.shown].hue) + "°   " + (root.gray && root.points[root.shown].gain > 0 ? "+" : "") + Math.round(root.points[root.shown].gain) + " %   ±" + Math.round(root.points[root.shown].width) + "°" : ""
     }
 }

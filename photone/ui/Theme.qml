@@ -37,7 +37,6 @@ QtObject {
     readonly property color white: fix("#ffffff")
 
     readonly property color card: fix("#1f1f23")     // the card a section of the right column stands on
-    readonly property int railButton: 40             // a tool's button on the rail, and its icon
     readonly property int railIcon: 25
 
     // What each card of the two side panels is told by: an icon (a path of 20 units a side)
@@ -50,11 +49,17 @@ QtObject {
     readonly property var cards: ({
         light: ["M7.2 12.6 a5 5 0 1 1 5.6 0 V14.6 H7.2 Z M8.2 17.4 H11.8", "#e0c25a"],
         balance: ["M10 2.5 a2 2 0 0 1 2 2 V11 a3.6 3.6 0 1 1 -4 0 V4.5 a2 2 0 0 1 2 -2 Z M10 8 V13", "#6fcc7c"],
+        lut: ["M10 2.5 L16.5 6 V14 L10 17.5 L3.5 14 V6 Z M3.5 6 L10 9.5 L16.5 6 M10 9.5 V17.5", "#5fcd9e"],
         curve: ["M3.5 3 V16.5 H17 M6 14 C10 14 10.5 6 16 5.5", "#4fcfc0"],
         saturation: ["M10 3 C10 3 4.5 9 4.5 12.2 a5.5 5.5 0 0 0 11 0 C15.5 9 10 3 10 3 Z", "#62a8e8"],
         eq: ["M5 3 V17 M10 3 V17 M15 3 V17 M3.4 7 H6.6 M8.4 12.5 H11.6 M13.4 6 H16.6", "#a583e6"],
         chroma: ["M3.5 16.5 C10 16.5 7 4 16.5 3.5 M3.5 16.4 V16.6 M16.5 3.4 V3.6", "#e56a9c"],
         wheel: ["M10 3 a7 7 0 1 0 0.01 0 Z M10 7.6 a2.4 2.4 0 1 0 0.01 0 Z", "#e8935a"],
+        detail: ["M10 3 L17 16.5 H3 Z M10 8.5 L13 14 H7 Z", "#e2685f"],
+        lens: ["M10 3 a7 7 0 1 0 0.01 0 Z M10 6.2 a3.8 3.8 0 1 0 0.01 0 Z M7.6 7.6 L4.9 4.9", "#d98a6a"],
+        grain: ["M5 4.5 a1 1 0 1 0 .01 0 Z M11 3.5 a1 1 0 1 0 .01 0 Z M15.5 7.5 a1 1 0 1 0 .01 0 Z M8 9 a1 1 0 1 0 .01 0 Z M4 13 a1 1 0 1 0 .01 0 Z M12.5 12 a1 1 0 1 0 .01 0 Z M9 15.5 a1 1 0 1 0 .01 0 Z M15.5 15 a1 1 0 1 0 .01 0 Z", "#cdb38f"],
+        presets: ["M5.5 3 H14.5 V17 L10 13.6 L5.5 17 Z", "#c9c9cf"],
+        mono: ["M10 3 a7 7 0 1 0 0.01 0 Z M10 3 V17 M10 6.5 H15.9 M10 10 H17 M10 13.5 H15.9", "#c9c9cf"],
         crop: ["M6 2 V14 H18 M2 6 H14 V18", "#c9c9cf"],
         masks: ["M3 3 H17 V17 H3 Z M10 6 a4 4 0 1 0 0.01 0 Z", "#c9c9cf"],
         mask: ["M10 3 a7 7 0 1 0 0.01 0 Z M10 3 V17", "#c9c9cf"],

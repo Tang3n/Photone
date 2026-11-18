@@ -37,6 +37,7 @@ Item {
         id: full
         source: bench.job.source || ""
         asynchronous: true; cache: false; visible: false
+        smooth: !bench.job.exact
         onStatusChanged: {
             // (Qt reads a render back only from a window that is on screen; in the checks,
             // which have none, scripts/shots.py takes the tiles itself.)
@@ -45,11 +46,13 @@ Item {
         }
     }
     Image { id: brushed; source: bench.job.painted || ""; asynchronous: false; cache: false; visible: false }
+    Image { id: table; source: bench.job.lut || ""; asynchronous: false; cache: false; visible: false }
     readonly property bool loaded: full.status === Image.Ready && job.source !== undefined
     Pipeline {
         id: render
         width: bench.job.width || 1; height: bench.job.height || 1
         source: full; painted: bench.job.painted ? brushed : full
+        lutPicture: bench.job.lut && table.status === Image.Ready && table.sourceSize.width > 1 ? table : null
         edit: bench.within >= 0 && bench.job.layers ? bench.job.layers[bench.within].numbers : bench.job.uniforms || session.uniforms
         peak: 1; hdrLift: 0; linearOut: 0; clipping: 0
         Local { over: render; layers: bench.job.layers || [] }

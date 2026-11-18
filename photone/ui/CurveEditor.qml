@@ -13,6 +13,7 @@ Item {
     property var bars: []                      // what lies behind it, heights 0..255
     property string low: "shadows"             // what the left end is called,
     property string high: "highlights"         // and the right
+    property bool rest: true                   // the straight line that changes nothing is drawn (a tone curve has one)
     // For a mask (`mask`: its number): its own curve, on top of the whole image's; straight
     // until it is changed (session.setMaskWhole).
     property bool local: false   // a mask's card: named apart from the whole image's editor
@@ -70,10 +71,12 @@ Item {
                 ctx.moveTo(root.px(0), Math.round(root.py(q / 4)) + 0.5); ctx.lineTo(root.px(1), Math.round(root.py(q / 4)) + 0.5)
             }
             ctx.stroke()
-            ctx.strokeStyle = Theme.faint   // the straight line: no change
-            ctx.setLineDash([2, 4])
-            ctx.beginPath(); ctx.moveTo(root.px(0), root.py(0)); ctx.lineTo(root.px(1), root.py(1)); ctx.stroke()
-            ctx.setLineDash([])
+            if (root.rest) {
+                ctx.strokeStyle = Theme.faint   // the straight line: no change
+                ctx.setLineDash([2, 4])
+                ctx.beginPath(); ctx.moveTo(root.px(0), root.py(0)); ctx.lineTo(root.px(1), root.py(1)); ctx.stroke()
+                ctx.setLineDash([])
+            }
             ctx.strokeStyle = Theme.text
             ctx.lineWidth = 1.6
             ctx.beginPath()

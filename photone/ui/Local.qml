@@ -23,7 +23,7 @@ Repeater {
         readonly property var mine: index < local.layers.length ? local.layers[index] : null   // (null: on its way out)
         visible: mine !== null
         anchors.fill: parent
-        source: local.over.source; sharp: local.over.sharp; painted: local.over.painted; showMask: local.over.showMask; useSharp: local.over.useSharp; crisp: local.over.crisp
+        source: local.over.source; sharp: local.over.sharp; painted: local.over.painted; lutPicture: local.over.lutPicture; showMask: local.over.showMask; useSharp: local.over.useSharp; crisp: local.over.crisp
         peak: local.over.peak; linearOut: local.over.linearOut; clipping: local.over.clipping
         cropDim: local.over.cropDim; cropBox: local.over.cropBox
         edit: mine ? mine.numbers : local.over.edit
