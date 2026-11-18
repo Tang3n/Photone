@@ -339,12 +339,21 @@ def _within(number, low: float, high: float, what: str) -> float:
     return round(min(high, max(low, float(number))), 5)
 
 
+class _Stroke(dict):
+    """A stroke as it is kept: `_strokes` made it, and takes it as it is the next time. (A
+    mask's strokes are all handed back at every move of the brush, with only the last one
+    longer: looked through anew each time, a mask of ten thousand places cost 1.5 ms a move.)"""
+
+
 def _strokes(given) -> list[dict]:
     """A painted mask's strokes as they are kept."""
     if not isinstance(given, (list, tuple)) or len(given) > STROKES:
         raise ValueError(f"at most {STROKES} strokes")
     out = []
     for stroke in given:
+        if type(stroke) is _Stroke:
+            out.append(stroke)
+            continue
         if not isinstance(stroke, dict):
             raise ValueError("a stroke is a brush and the places it went")
         try:
@@ -354,10 +363,10 @@ def _strokes(given) -> list[dict]:
         if points.ndim != 2 or points.shape[1] != 2 or not 1 <= len(points) <= REACH \
                 or not np.isfinite(points).all():
             raise ValueError("a stroke is one place or more, two numbers each")
-        out.append({**{key: _within(stroke.get(key), low, high, f"a brush's {key}")
-                       for key, (low, high) in STROKE.items()},
-                    "erase": bool(stroke.get("erase", False)),
-                    "points": np.round(np.clip(points, -1.0, 2.0), 4).tolist()})
+        out.append(_Stroke({**{key: _within(stroke.get(key), low, high, f"a brush's {key}")
+                               for key, (low, high) in STROKE.items()},
+                            "erase": bool(stroke.get("erase", False)),
+                            "points": np.round(np.clip(points, -1.0, 2.0), 4).tolist()}))
     return out
 
 
@@ -390,14 +399,15 @@ class Painter:
 
     ponytail: each stretch costs its bounding box (a brush of 5 %: a millisecond; at its
     largest, a million pixels and some 30 ms), and a mask of hundreds of long strokes takes
-    a moment to paint anew when a photo is opened. The upgrade is painting on the GPU."""
-
-    PIECE = 6.0  # a piece of a stroke, in brush radii of the way gone
+    a moment to paint anew when a photo is opened. So a stroke is painted by the GPU while
+    it is made (ui/brush.frag, by the same rule), and by this only once it is over."""
 
     def __init__(self, shape: float) -> None:
         wide, high = raster_size(shape)
         self.canvas = np.zeros((high, wide), dtype=np.float32)
         self.under = self.before = self.piece = None
+        # The same as bytes, and where the canvas has changed since they were made (`bytes`).
+        self.shown, self.stale, self.fresh = np.zeros((high, wide), dtype=np.uint8), None, None
 
     def begin(self) -> None:
         """A stroke begins: nothing of it is there yet."""
@@ -409,14 +419,13 @@ class Painter:
     def add(self, stroke: dict, start: int = 0) -> None:
         """Go on with the stroke begun, from its place `start`."""
         high, wide = self.canvas.shape
-        radius = max(0.5, stroke["size"] * wide)
-        core = 1 - max(stroke["feather"], 1e-4)
-        points = np.asarray(stroke["points"][max(0, start - 1):], dtype=float) * (wide, high)
-        for a, b in list(zip(points, points[1:], strict=False)) or [(points[0], points[0])]:
+        radius, core = brush_of(stroke, wide)
+        steps, gone = stretches(stroke, wide, high, start, self.gone)
+        for a, b, turn in steps:
             self._stretch(a, b, radius, core, stroke["erase"])
-            self.gone += float(np.hypot(*(b - a)))
-            if self.gone > self.PIECE * radius:  # the next stretch begins another piece
+            if turn:  # the next stretch begins another piece
                 self._turn()
+        self.gone = gone
 
     def _turn(self) -> None:
         """The piece under way becomes the one before, and a new one begins. Only where the
@@ -439,26 +448,86 @@ class Painter:
         if box[0].start >= box[0].stop or box[1].start >= box[1].stop:
             return
         was_at = self.reach  # (the piece under way reaches as far as its stretches' boxes)
-        self.reach = box if was_at is None else tuple(
-            slice(min(old.start, new.start), max(old.stop, new.stop))
-            for old, new in zip(was_at, box, strict=True))
-        # (A pixel is its middle.) How far each is from the stretch a to b.
-        ys, xs = np.mgrid[box] + 0.5
-        along = b - a
-        long = float(along @ along)
-        t = np.clip(((xs - a[0]) * along[0] + (ys - a[1]) * along[1]) / long, 0, 1) if long else 0.0
-        far = np.hypot(xs - a[0] - t * along[0], ys - a[1] - t * along[1]) / radius
-        np.maximum(self.piece[box], 1 - _step(core, 1.0, far), out=self.piece[box])
+        self.reach = box if was_at is None else _around(was_at, box)
+        self.stale = box if self.stale is None else _around(self.stale, box)
+        paint, far = _band(box, a, b, radius, core)
+        piece = self.piece[box]
+        np.maximum(piece, paint, out=piece)
         # This piece and the one before it as one (the larger), less what the one before
         # put there already: that much paint, or that much rubbed out, onto what is under.
         was = self.before[box]
-        both = np.maximum(self.piece[box], was)
-        more = np.where(was < 1, (both - was) / np.maximum(1 - was, 1e-6), 0)
+        more = np.maximum(piece, was, out=paint)
+        more -= was
+        more /= np.maximum(1 - was, np.float32(1e-6), out=far)
         under = self.under[box]
-        self.canvas[box] = under * (1 - more) if erase else 1 - (1 - under) * (1 - more)
+        if erase:
+            np.subtract(1, more, out=more)
+            np.multiply(under, more, out=self.canvas[box])
+        else:
+            np.subtract(1, under, out=far)
+            more *= far
+            more -= far                        # -(1 - under) (1 - more)
+            np.add(1, more, out=self.canvas[box])
 
     def bytes(self) -> np.ndarray:
-        return np.round(self.canvas * 255).astype(np.uint8)
+        """The raster as bytes. Only where it has changed since the last time is worked out
+        (`fresh`: that box, or none): the whole of it at every move of the brush was 3 ms."""
+        self.fresh, self.stale = self.stale, None
+        if self.fresh:
+            self.shown[self.fresh] = np.round(self.canvas[self.fresh] * 255)
+        return self.shown
+
+
+PIECE = 6.0  # a piece of a stroke, in brush radii of the way gone
+
+
+def brush_of(stroke: dict, wide: int) -> tuple:
+    """A stroke's brush on a raster that wide: (its radius in pixels, the share of it whole)."""
+    return max(0.5, stroke["size"] * wide), 1 - max(stroke["feather"], 1e-4)
+
+
+def stretches(stroke: dict, wide: int, high: int, start: int = 0, gone: float = 0.0) -> tuple:
+    """A stroke from its place `start` on, as what is painted one after another on a raster
+    that large: ([from, to, whether a piece ends there], the way gone in the piece under way).
+    Painter paints by this, and so does the shader that paints a stroke while it is made
+    (ui/brush.frag): the two must put the same pieces together."""
+    radius = brush_of(stroke, wide)[0]
+    points = np.asarray(stroke["points"][max(0, start - 1):], dtype=float) * (wide, high)
+    steps = []
+    for a, b in list(zip(points, points[1:], strict=False)) or [(points[0], points[0])]:
+        gone += float(np.hypot(*(b - a)))
+        turn = gone > PIECE * radius
+        steps.append((a, b, turn))
+        if turn:
+            gone = 0.0
+    return steps, gone
+
+
+def _band(box: tuple, a, b, radius: float, core: float) -> tuple:
+    """What the brush leaves from a to b within that box (two slices): 1 in its core, fading
+    to its edge; and an array as large to work in. (A pixel is its middle. A column and a row
+    of 32-bit numbers, not two grids of 64, and in place: this runs at every move of the brush.)"""
+    rows, columns = (np.arange(side.start, side.stop, dtype=np.float32) for side in box)
+    ys, xs = rows[:, None] + np.float32(0.5 - a[1]), columns[None, :] + np.float32(0.5 - a[0])
+    along = (b - a).astype(np.float32)
+    long = np.float32(along @ along)
+    t = np.clip((xs * along[0] + ys * along[1]) / long, 0, 1) if long else np.float32(0)
+    far = np.hypot(xs - t * along[0], ys - t * along[1])   # how far each is from the stretch
+    far *= np.float32(1 / (radius * (1 - core)))
+    far -= np.float32(core / (1 - core))
+    np.clip(far, 0, 1, out=far)            # smoothstep from the core to the brush's edge,
+    paint = far * far
+    far *= -2
+    far += 3
+    paint *= far
+    np.subtract(1, paint, out=paint)       # and the paint is what is left of it
+    return paint, far
+
+
+def _around(one: tuple, other: tuple) -> tuple:
+    """The box (two slices) that holds both."""
+    return tuple(slice(min(old.start, new.start), max(old.stop, new.stop))
+                 for old, new in zip(one, other, strict=True))
 
 
 def painted(strokes: list[dict], shape: float) -> np.ndarray:

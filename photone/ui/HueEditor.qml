@@ -20,11 +20,14 @@ Item {
     // For a mask (`mask`: its number): its own EQ, or until it has one the whole image's.
     property bool local: false   // a mask's card: named apart from the whole image's editor
     property int mask: 0
-    readonly property var points: mask > 0 ? (session.masks, session.localWhole(mask, "eq")) : gray ? session.bw : session.eq
+    // (A mask's, by way of their text: CurveEditor.qml says why.)
+    readonly property string own: mask > 0 ? (session.masks, JSON.stringify(session.localWhole(mask, "eq"))) : ""
+    readonly property string ownLine: mask > 0 ? (session.masks, JSON.stringify(session.localLine(mask, "eq"))) : ""
+    readonly property var points: mask > 0 ? JSON.parse(own) : gray ? session.bw : session.eq
     // The gain at every other degree: 0..2 of the chroma, or (gray) percent lighter.
-    readonly property var line: mask > 0 ? (session.masks, session.localLine(mask, "eq")) : gray ? session.bwLine : session.eqLine
+    readonly property var line: mask > 0 ? JSON.parse(ownLine) : gray ? session.bwLine : session.eqLine
     function put(list) { if (mask > 0) session.setMaskWhole(mask, "eq", list); else session.setEdit(key, list) }
-    readonly property var bars: (session.bars.hue || [])   // heights 0..255
+    property Item tally   // what counts how much of the photo has which hue (Counts.qml)
     readonly property var hues: session.hues             // the strip's colors, hue 0 to 360
     property int held: -1                      // the point being dragged
     property int hot: -1                       // the point under the pointer
@@ -47,33 +50,22 @@ Item {
     onVisibleChanged: paint()
     onPointsChanged: paint()
     onLineChanged: paint()
-    onBarsChanged: paint()
     onShownChanged: paint()
     onHuesChanged: strip.requestPaint()
     onGrayChanged: { paint(); strip.requestPaint() }
     Timer { id: settled; interval: 500; onTriggered: session.commitEdit() }   // after the last notch of a wheel
 
+    // The grid, under the bars (the owner: "the histograms should render on top of the grid").
+    Repeater { model: 7; Rectangle { x: Math.round(root.px(index * 60)); y: root.inset; width: 1; height: root.h; color: Theme.line } }
+    Repeater { model: 5; Rectangle { x: root.inset; y: Math.round(root.inset + index / 4 * root.h); width: root.w; height: 1; color: Theme.line } }
+    Bars { x: root.inset; y: root.inset + 0.08 * root.h; width: root.w; height: 0.92 * root.h; tally: root.tally; kind: "hue" }
     Canvas {
         id: plot
         objectName: (root.local ? "local-" : "") + root.key + "-plot"
         anchors { left: parent.left; right: parent.right; top: parent.top; bottom: parent.bottom; bottomMargin: root.gray ? 43 : 34 }
         onPaint: {
-            const ctx = getContext("2d"), bars = root.bars, line = root.line
+            const ctx = getContext("2d"), line = root.line
             ctx.reset()
-            if (bars.length) {
-                ctx.fillStyle = Theme.raised
-                ctx.beginPath()
-                ctx.moveTo(root.px(0), root.inset + root.h)
-                for (let i = 0; i < bars.length; i++) ctx.lineTo(root.px((i + 0.5) / bars.length * 360), root.inset + (1 - bars[i] / 255 * 0.92) * root.h)
-                ctx.lineTo(root.px(360), root.inset + root.h)
-                ctx.fill()
-            }
-            ctx.lineWidth = 1
-            ctx.strokeStyle = Theme.line
-            ctx.beginPath()
-            for (let q = 0; q <= 4; q++) { const y = Math.round(root.inset + q / 4 * root.h) + 0.5; ctx.moveTo(root.px(0), y); ctx.lineTo(root.px(360), y) }
-            for (let q = 0; q <= 6; q++) { ctx.moveTo(Math.round(root.px(q * 60)) + 0.5, root.inset); ctx.lineTo(Math.round(root.px(q * 60)) + 0.5, root.inset + root.h) }
-            ctx.stroke()
             ctx.strokeStyle = Theme.text
             ctx.lineWidth = 1.6
             ctx.beginPath()

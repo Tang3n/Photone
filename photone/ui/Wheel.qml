@@ -220,18 +220,21 @@ Rectangle {
     // The photo's colors, as dots, drawn by the GPU from the photo itself at every frame
     // (dots.vert): a small render of the photo that carries each pixel's color as numbers,
     // and a mesh that puts a dot where each of those colors lies on the wheel. A slider that
-    // moves the photo's colors moves the dots in the same frame.
+    // moves the photo's colors moves the dots in the same frame. While a mask's pins are worked
+    // on, only the colors that mask reaches are dots, and they follow the mask as it is moved.
     property var picture                    // the photo's first picture (an Image)
     property var painted                    // and its painted masks' (PhotoView.painted)
     property var lut: null                  // and its LUT's (PhotoView.lut), or none
+    readonly property Item colors: numbers   // that render: Counts.qml counts the lightness strip from it
     readonly property int side: 127         // dots across and down: one for each pixel of that render
     Pipeline {
         id: numbers
         objectName: "wheel-colors"
         width: root.side; height: root.side; visible: false
         source: root.picture; sharp: root.picture; useSharp: 0; painted: root.painted || root.picture; lutPicture: root.lut
-        edit: session.inFrame
+        follows: root.visible; edit: follows ? session.inFrame : null
         scope: session.panels.live ? 9 : 8   // after everything, or before the pins
+        showMask: root.mask                  // inside a mask: only what the mask reaches
         peak: 1; hdrLift: 0; linearOut: 0; clipping: 0
         layer.enabled: true; layer.format: ShaderEffectSource.RGBA16F; layer.smooth: false
     }

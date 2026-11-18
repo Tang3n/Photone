@@ -173,13 +173,120 @@ Item {
     // photo's own colors in the masks' place for a frame; the owner: "the entire canvas
     // flickers crazily".)
     property bool brushedOnce: false
-    readonly property var painted: brushedOnce && session.paintedSource !== "" ? brushed : pixels
+    readonly property bool brushedThere: brushedOnce && session.paintedSource !== ""
+    readonly property var painted: brush.on ? brush.item.mix : brushedThere ? brushed : pixels
     Image {
         id: brushed
         source: session.paintedSource; asynchronous: true; cache: false; visible: false; retainWhileLoading: true
-        onStatusChanged: if (status === Image.Ready) view.brushedOnce = true
-        onSourceChanged: if (String(source) === "") view.brushedOnce = false
+        onStatusChanged: {
+            if (status !== Image.Ready) return
+            view.brushedOnce = true
+            if (String(source) !== brush.held) brush.over()   // the picture with the stroke in it has come
+        }
+        onSourceChanged: if (String(source) === "") { view.brushedOnce = false; brush.over() }
     }
+    // A stroke while it is made is painted by the GPU (brush.frag), not into that picture: a
+    // step each frame, of up to sixteen stretches of the way, onto the picture of the steps
+    // before. `painted` is then the masks' picture with that in its mask's place (brushed.frag),
+    // until the picture that has the stroke in it has come: that one is made once, when the
+    // stroke is over, and not on this thread. (It was made at every move of the brush, at a
+    // cost that grew with the brush: a large one moved fast ran at 50 frames a second.)
+    // ponytail: one stroke's mask at a time. A stroke begun on another mask before the picture
+    // of the last has come (some hundredths of a second) shows the last one late, not at once.
+    Loader {
+        id: brush
+        objectName: "brush"
+        // (On show, though nothing of it is seen: Qt paints a step only for an item that is,
+        // and not for one that is clear. So one pixel of it, just outside this view's edge.)
+        x: -2; y: -2; width: 1; height: 1; clip: true
+        active: false                  // from the first stroke on: its pictures are some 60 MB of the GPU's
+        property bool on: false        // `painted` is the GPU's
+        property string held: ""       // the picture's address when the stroke under way began
+        property var waiting: []       // what is not painted yet (session.brushed), oldest first
+        property bool stepping: false  // a step is being painted
+        property bool wanted: false    // a stroke is not in the picture yet
+        property int steps: 0          // how many were (the checks wait for them)
+        property size raster: Qt.size(16, 16)
+        property real channel: 0
+        property real erase: 0
+        function over() { on = wanted = false; waiting = [] }
+        function add(stroke) {
+            active = wanted = true
+            if (stroke.begin) held = session.paintedSource
+            // (More of the stroke that waits: one with it, so that a step takes what it can hold.)
+            if (!stroke.begin && waiting.length) waiting[waiting.length - 1].steps.push(...stroke.steps)
+            else waiting.push(stroke)
+            step()
+        }
+        function step() {
+            if (stepping || !waiting.length || !item) return
+            const stroke = waiting[0], now = stroke.steps.splice(0, 16), to = item.painter
+            if (!stroke.steps.length) waiting.shift()
+            // (On what was painted here, where that is not in the picture yet; else on the picture.)
+            to.begin = !stroke.begin ? 0 : on && stroke.channel === channel && raster.width === stroke.wide ? 2 : 1
+            to.erased = erase
+            stroke.begin = false
+            raster = Qt.size(stroke.wide, stroke.high); channel = stroke.channel; erase = stroke.erase ? 1 : 0
+            to.radius = stroke.radius; to.core = stroke.core; to.count = now.length
+            const places = [[], [], [], []], turns = new Array(16).fill(0)
+            for (let i = 0; i < 16; i++) {
+                for (let k = 0; k < 4; k++) places[Math.floor(i / 4)][k * 4 + i % 4] = i < now.length ? now[i][k] : 0
+                turns[(i % 4) * 4 + Math.floor(i / 4)] = i < now.length && now[i][4] ? 1 : 0
+            }
+            to.s0 = Qt.matrix4x4(...places[0]); to.s1 = Qt.matrix4x4(...places[1]); to.s2 = Qt.matrix4x4(...places[2]); to.s3 = Qt.matrix4x4(...places[3])
+            to.turns = Qt.matrix4x4(...turns)
+            stepping = true
+            item.kept.scheduleUpdate()
+        }
+        // (Not `on` where the picture came while this step was painted: it has the stroke.)
+        function stepped() { stepping = false; steps++; on = wanted; step() }
+        onLoaded: step()
+        sourceComponent: Item {
+            property alias painter: painter
+            property alias kept: kept
+            property alias mix: mix
+            ShaderEffect {
+                id: painter
+                width: brush.raster.width; height: brush.raster.height
+                property var was: kept
+                property var base: brushed
+                property real begin: 0
+                property real channel: brush.channel
+                property real count: 0
+                property real radius: 1
+                property real core: 0
+                property real erase: brush.erase
+                property real erased: 0   // of the stroke before, which `begin` 2 puts together
+                property size size: brush.raster
+                property matrix4x4 s0
+                property matrix4x4 s1
+                property matrix4x4 s2
+                property matrix4x4 s3
+                property matrix4x4 turns
+                fragmentShader: brushShader; vertexShader: brushVertex
+            }
+            ShaderEffectSource {
+                id: kept
+                width: painter.width; height: painter.height
+                sourceItem: painter; recursive: true; live: false; hideSource: true; smooth: false
+                format: ShaderEffectSource.RGBA16F; textureSize: brush.raster
+                onScheduledUpdateCompleted: brush.stepped()
+            }
+            ShaderEffect {
+                id: mix
+                objectName: "brush-mix"
+                width: brush.raster.width; height: brush.raster.height; visible: false
+                property var state: kept
+                property var base: view.brushedThere ? brushed : pixels
+                property real based: view.brushedThere ? 1 : 0
+                property real channel: brush.channel
+                property real erase: brush.erase
+                fragmentShader: brushedShader; vertexShader: brushedVertex
+                layer.enabled: true; layer.textureSize: brush.raster
+            }
+        }
+    }
+    Connections { target: session; function onBrushed(stroke) { brush.add(stroke) } }
     readonly property bool sharpReady: sharpPixels.status === Image.Ready && sharpPixels.sourceSize.width > 1
     readonly property bool useSharp: sharpReady && shown * session.wide > pixels.sourceSize.width * 1.01
     // From 200 % the photo shows its own pixels as squares (pipeline.frag, `squarely`): only
@@ -203,7 +310,11 @@ Item {
         // (The clipping paint's stripes run, a stripe every 0.6 s, only while it is on.)
         NumberAnimation on stripes { running: session.panels.clipping && view.visible && view.ready; from: 0; to: 1; duration: 600; loops: Animation.Infinite }
         reach: view.reach
-        showMask: view.showMask > 0 ? view.showMask : maskFrame.tinting ? -view.mask : 0
+        // The mask being worked on, laid over the photo in red while the pointer is on the
+        // photo (MaskFrame.tinting); it fades in and out.
+        showMask: view.showMask > 0 ? view.showMask : maskTint > 0 ? -view.mask : 0
+        maskTint: maskFrame.tinting ? 1 : 0
+        Behavior on maskTint { NumberAnimation { duration: 160 } }
         Local { over: photo; layers: session.maskLayers }
         // The watermark an export will have, where it will have it (not while the frame is
         // being set, when what is on show is not the frame).
@@ -222,7 +333,7 @@ Item {
             objectName: "photo-before"
             width: photo.width; height: photo.height
             source: pixels; sharp: photo.sharp; useSharp: photo.useSharp; crisp: photo.crisp
-            edit: session.before
+            edit: follows ? session.before : null
         }
     }
     signal clicked()   // the photo was pressed: the window's keys belong to it again

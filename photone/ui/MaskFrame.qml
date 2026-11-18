@@ -178,12 +178,17 @@ Item {
     // A painted mask: the left button paints on the photo with a round brush, or rubs out.
     // The brush is drawn round the pointer: its edge, and inside it where it begins to fade.
     // While the pointer is on the photo the mask lies over it in red (`tinting`: the photo's
-    // shader does that), and not while it is elsewhere, on a slider.
+    // shader does that, and fades it in and out), and not while it is elsewhere, on a slider.
+    // Any mask, not only a painted one (the owner: "all the other masks should display just
+    // like the brush one does"); and while one is being dragged, wherever the pointer gets to.
     property real brushSize: 0.05      // the brush's radius as a share of the photo's width
     property real brushFeather: 0.5    // how much of that radius fades out
     property bool erasing: false
     signal sized(real size)            // Ctrl and the wheel: the brush larger or smaller
-    readonly property bool tinting: brush && visible && (painter.containsMouse || painter.pressed)
+    readonly property bool onPhoto: pointer.hovered && around.spot.x >= 0 && around.spot.y >= 0
+                                    && around.spot.x <= width && around.spot.y <= height
+    readonly property bool tinting: visible && (onPhoto || painter.containsMouse || painter.pressed || turner.pressed
+                                                || sideGrip.pressed || toGrip.pressed || atGrip.pressed)
     MouseArea {
         id: painter
         objectName: "mask:paint"

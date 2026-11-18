@@ -37,6 +37,7 @@ layout(std140, binding = 0) uniform buf {  // must match pipeline.frag exactly
     float chromaOn;
     float eqCount;
     float showMask;
+    float maskTint;
     vec4 wbGain;
     mat4 toCam;
     mat4 fromCam;

@@ -21,96 +21,106 @@ ShaderEffect {
     property real linearOut: session.linearSurface ? 1 : 0
     property real peak: session.hdr ? session.peak : 1
     // The edit, as numbers (photone/edit.py works them out).
-    property var edit: session.uniforms
-    property real gain: edit.gain
-    property real mid: edit.mid
-    property real contrast: edit.contrast
-    property real brightness: edit.brightness
-    property real highlights: edit.highlights
-    property real shadows: edit.shadows
-    property real midtones: edit.midtones
-    property real whites: edit.whites
-    property real blacks: edit.blacks
-    property real curveC: edit.curveC
-    property real curveS: edit.curveS
-    property real curveK: edit.curveK
-    property real hdrLift: edit.hdrLift
+    // Whether it takes the edit's new numbers in: not while it is out of sight, since each
+    // change of a slider costs a render some eighty values taken in, drawn or not. (One that
+    // is drawn while not `visible`, into a layer, says so itself.)
+    property bool follows: visible
+    property var edit: follows ? session.uniforms : null
+    property var used: session.uniforms   // the numbers it draws with: `edit` as last taken in
+    function takeIn() { if (follows && edit) used = edit }
+    onEditChanged: takeIn()
+    onFollowsChanged: Qt.callLater(takeIn)   // (whichever of the two comes first; later, since at the start `edit` may not be there to read yet)
+    Component.onCompleted: used = edit || session.uniforms   // (an assignment: from here on only `takeIn` sets it)
+    property real gain: used.gain
+    property real mid: used.mid
+    property real contrast: used.contrast
+    property real brightness: used.brightness
+    property real highlights: used.highlights
+    property real shadows: used.shadows
+    property real midtones: used.midtones
+    property real whites: used.whites
+    property real blacks: used.blacks
+    property real curveC: used.curveC
+    property real curveS: used.curveS
+    property real curveK: used.curveK
+    property real hdrLift: used.hdrLift
     property real hdrFit: 1
     property real stripes: 0
-    property real curveOn: edit.curveOn
-    property real pinCount: edit.pinCount
+    property real curveOn: used.curveOn
+    property real pinCount: used.pinCount
     property real reach: 0
-    property real look: edit.look
-    property real mono: edit.mono
-    property real saturation: edit.saturation
-    property real vibrance: edit.vibrance
-    property real chromaOn: edit.chromaOn
-    property real eqCount: edit.eqCount
+    property real look: used.look
+    property real mono: used.mono
+    property real saturation: used.saturation
+    property real vibrance: used.vibrance
+    property real chromaOn: used.chromaOn
+    property real eqCount: used.eqCount
     property real showMask: 0
-    property vector4d wbGain: edit.wbGain
-    property matrix4x4 toCam: edit.toCam
-    property matrix4x4 fromCam: edit.fromCam
-    property matrix4x4 curveX: edit.curveX
-    property matrix4x4 curveY: edit.curveY
-    property matrix4x4 curveM: edit.curveM
-    property matrix4x4 pinsA0: edit.pinsA0
-    property matrix4x4 pinsA1: edit.pinsA1
-    property matrix4x4 pinsA2: edit.pinsA2
-    property matrix4x4 pinsB0: edit.pinsB0
-    property matrix4x4 pinsB1: edit.pinsB1
-    property matrix4x4 pinsB2: edit.pinsB2
-    property matrix4x4 pinsC0: edit.pinsC0
-    property matrix4x4 pinsC1: edit.pinsC1
-    property matrix4x4 pinsC2: edit.pinsC2
-    property matrix4x4 chromaX: edit.chromaX
-    property matrix4x4 chromaY: edit.chromaY
-    property matrix4x4 chromaM: edit.chromaM
-    property matrix4x4 eqA0: edit.eqA0
-    property matrix4x4 eqA1: edit.eqA1
-    property matrix4x4 frame: edit.frame
-    property matrix4x4 masksA0: edit.masksA0
-    property matrix4x4 masksA1: edit.masksA1
-    property matrix4x4 masksB0: edit.masksB0
-    property matrix4x4 masksB1: edit.masksB1
-    property real curve2On: edit.curve2On
-    property real chroma2On: edit.chroma2On
-    property real eq2Count: edit.eq2Count
-    property matrix4x4 curve2X: edit.curve2X
-    property matrix4x4 curve2Y: edit.curve2Y
-    property matrix4x4 curve2M: edit.curve2M
-    property matrix4x4 chroma2X: edit.chroma2X
-    property matrix4x4 chroma2Y: edit.chroma2Y
-    property matrix4x4 chroma2M: edit.chroma2M
-    property matrix4x4 eq2A0: edit.eq2A0
-    property matrix4x4 eq2A1: edit.eq2A1
-    property real grain: edit.grain
-    property real grainWide: edit.grainWide
-    property real grainHigh: edit.grainHigh
-    property real grainRough: edit.grainRough
-    property real grainColor: edit.grainColor
-    property matrix4x4 grainX: edit.grainX
-    property matrix4x4 grainY: edit.grainY
-    property matrix4x4 grainM: edit.grainM
-    property real lutCount: lutPicture ? edit.lutCount : 0
-    property matrix4x4 lutsA: edit.lutsA
-    property matrix4x4 lutsB: edit.lutsB
-    property matrix4x4 lutsC: edit.lutsC
-    property matrix4x4 lutsD: edit.lutsD
-    property real detailX: edit.detailX
-    property real detailY: edit.detailY
-    property real sharpen: edit.sharpen
-    property real sharpenRadius: edit.sharpenRadius
-    property real sharpenMask: edit.sharpenMask
-    property real denoise: edit.denoise
-    property real denoiseColor: edit.denoiseColor
-    property real lensOn: edit.lensOn
-    property real lensShape: edit.lensShape
-    property matrix4x4 lensGreen: edit.lensGreen
-    property matrix4x4 lensRed: edit.lensRed
-    property matrix4x4 lensBlue: edit.lensBlue
-    property matrix4x4 lensLight: edit.lensLight
-    property real defringePurple: edit.defringePurple
-    property real defringeGreen: edit.defringeGreen
+    property real maskTint: 1
+    property vector4d wbGain: used.wbGain
+    property matrix4x4 toCam: used.toCam
+    property matrix4x4 fromCam: used.fromCam
+    property matrix4x4 curveX: used.curveX
+    property matrix4x4 curveY: used.curveY
+    property matrix4x4 curveM: used.curveM
+    property matrix4x4 pinsA0: used.pinsA0
+    property matrix4x4 pinsA1: used.pinsA1
+    property matrix4x4 pinsA2: used.pinsA2
+    property matrix4x4 pinsB0: used.pinsB0
+    property matrix4x4 pinsB1: used.pinsB1
+    property matrix4x4 pinsB2: used.pinsB2
+    property matrix4x4 pinsC0: used.pinsC0
+    property matrix4x4 pinsC1: used.pinsC1
+    property matrix4x4 pinsC2: used.pinsC2
+    property matrix4x4 chromaX: used.chromaX
+    property matrix4x4 chromaY: used.chromaY
+    property matrix4x4 chromaM: used.chromaM
+    property matrix4x4 eqA0: used.eqA0
+    property matrix4x4 eqA1: used.eqA1
+    property matrix4x4 frame: used.frame
+    property matrix4x4 masksA0: used.masksA0
+    property matrix4x4 masksA1: used.masksA1
+    property matrix4x4 masksB0: used.masksB0
+    property matrix4x4 masksB1: used.masksB1
+    property real curve2On: used.curve2On
+    property real chroma2On: used.chroma2On
+    property real eq2Count: used.eq2Count
+    property matrix4x4 curve2X: used.curve2X
+    property matrix4x4 curve2Y: used.curve2Y
+    property matrix4x4 curve2M: used.curve2M
+    property matrix4x4 chroma2X: used.chroma2X
+    property matrix4x4 chroma2Y: used.chroma2Y
+    property matrix4x4 chroma2M: used.chroma2M
+    property matrix4x4 eq2A0: used.eq2A0
+    property matrix4x4 eq2A1: used.eq2A1
+    property real grain: used.grain
+    property real grainWide: used.grainWide
+    property real grainHigh: used.grainHigh
+    property real grainRough: used.grainRough
+    property real grainColor: used.grainColor
+    property matrix4x4 grainX: used.grainX
+    property matrix4x4 grainY: used.grainY
+    property matrix4x4 grainM: used.grainM
+    property real lutCount: lutPicture ? used.lutCount : 0
+    property matrix4x4 lutsA: used.lutsA
+    property matrix4x4 lutsB: used.lutsB
+    property matrix4x4 lutsC: used.lutsC
+    property matrix4x4 lutsD: used.lutsD
+    property real detailX: used.detailX
+    property real detailY: used.detailY
+    property real sharpen: used.sharpen
+    property real sharpenRadius: used.sharpenRadius
+    property real sharpenMask: used.sharpenMask
+    property real denoise: used.denoise
+    property real denoiseColor: used.denoiseColor
+    property real lensOn: used.lensOn
+    property real lensShape: used.lensShape
+    property matrix4x4 lensGreen: used.lensGreen
+    property matrix4x4 lensRed: used.lensRed
+    property matrix4x4 lensBlue: used.lensBlue
+    property matrix4x4 lensLight: used.lensLight
+    property real defringePurple: used.defringePurple
+    property real defringeGreen: used.defringeGreen
     fragmentShader: pipelineShader
     vertexShader: pipelineVertex
 }

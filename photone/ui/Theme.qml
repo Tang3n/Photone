@@ -66,7 +66,7 @@ QtObject {
         mask: ["M10 3 a7 7 0 1 0 0.01 0 Z M10 3 V17", "#c9c9cf"],
         folders: ["M2.5 5.5 H8 L10 7.5 H17.5 V15.5 H2.5 Z", "#d9b074"],
         photo: ["M3 7 H6.5 L8 5 H12 L13.5 7 H17 V15.5 H3 Z M10 9 a2.5 2.5 0 1 0 0.01 0 Z", "#8fb6e8"],
-        checkpoints: ["M5 17.5 V3 M5 4 H15 L12.5 7.5 L15 11 H5", "#e2a55a"]
+        checkpoints: ["M5 17.5 V3 M5 4 H15 L12.5 7.5 L15 11 H5", "#6fcc7c"]
     })
     readonly property int titleSize: 13   // a card's title,
     readonly property int cardSign: 19    // its icon,

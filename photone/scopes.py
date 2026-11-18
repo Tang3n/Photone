@@ -33,18 +33,22 @@ def tiles(seen: np.ndarray) -> list[np.ndarray]:
     return [seen[y:y + h, x:x + w] for y in (0, h) for x in (0, w, 2 * w)]
 
 
-def histogram_of(seen: np.ndarray) -> dict:
+def histogram_of(seen: np.ndarray, inside: np.ndarray | None = None) -> dict:
     """r, g, b of the picture as displayed and `light` (before the tone curve): 256 heights
     each, relative to the tallest bar that is not at an end, so that a clipped spike does not
-    flatten everything else; `over`, `under`: the share of pixels at white and at black."""
-    picture, light = tiles(seen)[0][..., :3].reshape(-1, 3), tiles(seen)[1][..., 0].ravel()
+    flatten everything else; `over`, `under`: the share of pixels at white and at black. Of
+    the pixels `inside` only (`inside_of`: those a mask reaches), where that is given."""
+    picture, light = tiles(seen)[0][..., :3], tiles(seen)[1][..., 0]
+    if inside is not None:
+        picture, light = picture[inside], light[inside]
+    picture, light = picture.reshape(-1, 3), light.ravel()
     counts = [np.bincount(picture[:, i], minlength=256) for i in range(3)]
     tallest = max(1, *(int(c[1:255].max()) for c in counts))
     lightness = np.convolve(np.bincount(light, minlength=256), [0.25, 0.5, 0.25], "same")
     out = {"rgb"[i]: np.minimum(c / tallest, 1.0).tolist() for i, c in enumerate(counts)}
     out["light"] = np.minimum(lightness / max(1.0, lightness[1:255].max()), 1.0).tolist()
-    out["over"] = float((picture.max(axis=1) == 255).mean())
-    out["under"] = float((picture.max(axis=1) == 0).mean())
+    most = picture.max(axis=1) if len(picture) else np.array([1])  # (nothing inside: none)
+    out["over"], out["under"] = float((most == 255).mean()), float((most == 0).mean())
     return out
 
 
@@ -76,6 +80,12 @@ def lab_of(seen: np.ndarray, pinned: bool = False) -> tuple[np.ndarray, np.ndarr
     return third[..., 2] / 255, a, b
 
 
+def inside_of(seen: np.ndarray) -> np.ndarray:
+    """Which pixels of a tile count for the wheel: all of them, or, while a mask's pins are
+    worked on, those the mask reaches (pipeline.frag writes it beside b)."""
+    return tiles(seen)[3][..., 2] > 127
+
+
 def srgb_of(light: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """OKLab colors as sRGB bytes, cut to what sRGB can show."""
     roots = np.stack([light, a, b], axis=-1) @ LAB_TO_ROOTS.T
@@ -84,7 +94,8 @@ def srgb_of(light: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.round(coded * 255).astype(np.uint8)
 
 
-def cloud_of(light: np.ndarray, a: np.ndarray, b: np.ndarray, tones: tuple = (0.0, 1.0)) -> dict:
+def cloud_of(light: np.ndarray, a: np.ndarray, b: np.ndarray, tones: tuple = (0.0, 1.0),
+             inside: np.ndarray | None = None) -> dict:
     """The photo's colors, counted for the wheel: what Fit frames and what the checks look at.
     (The wheel's dots themselves are drawn by the GPU from the photo: ui/dots.vert.)
 
@@ -93,11 +104,14 @@ def cloud_of(light: np.ndarray, a: np.ndarray, b: np.ndarray, tones: tuple = (0.
     `light` (64 heights: how much of the photo is how light, whatever the range). `listed`
     gives the same as plain lists.
 
-    Only pixels whose lightness is within `tones` (least, most) count. Colors are gathered
+    Only pixels whose lightness is within `tones` (least, most) count, and of those only
+    the ones `inside` (`inside_of`: a mask), for the dots and for `light` alike. Colors are gathered
     into cells of a grid, in three bands of lightness, so that a common color is one dot and
     not thousands; the grid gets coarser until there are few enough to draw. A dot is one real
     color out of its cell, not the cell's average: drawn at the averages, a crowd of colors
     shows as the grid it was counted on."""
+    if inside is not None:
+        light, a, b = light[inside], a[inside], b[inside]
     bars = np.bincount(np.minimum((light.ravel() * 64).astype(int), 63), minlength=64)
     out = {"points": np.zeros((0, 2), np.float32), "colors": np.zeros((0, 3), np.uint8),
            "box": [], "light": (bars / max(1, bars.max())).tolist()}

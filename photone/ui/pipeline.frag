@@ -43,7 +43,9 @@ layout(std140, binding = 0) uniform buf {
     float chromaOn;   // 1: the chroma curve is not the straight line
     float eqCount;    // how many points the color EQ has
     float showMask;   // 1 + the mask that is shown instead of the picture (H held); 0: none;
-                      // below zero: that mask laid over the picture in red (while it is painted)
+                      // below zero: that mask laid over the picture in red (while it is painted).
+                      // For what is counted (scope 2 to 5, 8, 9): only what is in that mask counts
+    float maskTint;   // how much of that red there is, 0..1 (it fades in and out)
     vec4 wbGain;      // white balance: a gain on each of the camera's channels; a = their ceiling
     mat4 toCam;       // Rec.2020 -> the camera's own colors (upper 3x3)
     mat4 fromCam;     // and back
@@ -322,11 +324,11 @@ vec3 pinned(vec3 lab, out float shield) {
 }
 
 // A color for the wheel, to be read back: a (or b) from -0.5 to 0.5 in sixteen bits (one byte
-// would show as a grid), and the lightness.
-vec4 packed(vec3 lab, bool second) {
+// would show as a grid), and with a the lightness, with b whether the pixel counts (`counts`).
+vec4 packed(vec3 lab, bool second, float counts) {
     float wide = clamp((second ? lab.z : lab.y) + 0.5, 0.0, 1.0) * 65535.0;
     float high = floor(wide / 256.0);
-    return vec4(high / 255.0, floor(wide - high * 256.0) / 255.0, clamp(lab.x, 0.0, 1.0), 1.0);
+    return vec4(high / 255.0, floor(wide - high * 256.0) / 255.0, second ? counts : clamp(lab.x, 0.0, 1.0), 1.0);
 }
 
 // Where to read a picture so that each of its pixels shows as a square of its own color, with
@@ -504,10 +506,14 @@ void main() {
             // Look: on the color as OKLab has it. The pins, then saturation (not where a pin
             // protects), the chroma curve, the color EQ: edit.colors_at is the same arithmetic.
             vec3 lab = ROOTS_TO_LAB * roots;
-            if (scope > 1.5 && scope < 3.5) { fragColor = packed(lab, scope > 2.5); return; }
+            // Whether this pixel counts for the wheel: all of the photo, or, while a mask's
+            // pins are worked on, what that mask reaches (0.02 of it or more: what it can
+            // change so that it shows). The owner: "ONLY what the mask actually sees".
+            float counts = showMask > 0.5 ? step(0.02, maskWeight(int(showMask) - 1)) : 1.0;
+            if (scope > 1.5 && scope < 3.5) { fragColor = packed(lab, scope > 2.5, counts); return; }
             // For the wheel's dots, which are drawn from it (dots.vert): the color itself, as
             // numbers of a float picture; before the pins (8) or after everything (9).
-            if (scope > 7.5 && scope < 8.5) { fragColor = vec4(lab, 1.0); return; }
+            if (scope > 7.5 && scope < 8.5) { fragColor = vec4(lab, counts); return; }
             float shield = 0.0;
             if (pinCount > 0.5) {
                 if (reach > 0.5 && scope < 0.5) {  // what one pin reaches: white on a dim gray of the picture
@@ -538,8 +544,8 @@ void main() {
                 if (eq2Count > 0.5) after *= eqGain(eq2A0, eq2A1, eq2Count, hue);
                 lab.yz *= after / chroma;
             }
-            if (scope > 3.5 && scope < 5.5) { fragColor = packed(lab, scope > 4.5); return; }
-            if (scope > 8.5) { fragColor = vec4(lab, 1.0); return; }
+            if (scope > 3.5 && scope < 5.5) { fragColor = packed(lab, scope > 4.5, counts); return; }
+            if (scope > 8.5) { fragColor = vec4(lab, counts); return; }
             if (grain > 0.0) {
                 // Film grain, last of all (not in what the scopes count, which returned
                 // above): lighter and darker by the grain at this place of the stored
@@ -584,7 +590,7 @@ void main() {
     // Cropping: outside the frame, dimmed here and not by something laid over the picture,
     // which cut its own edge and left a bright pixel wherever the two edges disagreed (the
     // owner: "those bright pixels around those jagged edges"). As a black at 60 % over it.
-    if (showMask < -0.5 && scope < 0.5) c = mix(c, vec3(1.0, 0.12, 0.1), 0.42 * maskWeight(int(-showMask) - 1));
+    if (showMask < -0.5 && scope < 0.5) c = mix(c, vec3(1.0, 0.12, 0.1), 0.42 * maskTint * maskWeight(int(-showMask) - 1));
     if (cropDim > 0.5 && (place.x < cropBox.x || place.y < cropBox.y || place.x > cropBox.z || place.y > cropBox.w))
         c *= linearOut > 0.5 ? 0.133 : 0.4;
     // A mask's own picture (developed with the mask's amounts added, Local.qml lays it over

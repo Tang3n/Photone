@@ -10,7 +10,8 @@ Item {
     signal done()                              // a gesture is over
     property string key: "curve"               // the setting in the photo's edit
     property var line: []                      // the curve as heights, left to right (edit.LINE of them)
-    property var bars: []                      // what lies behind it, heights 0..255
+    property Item tally                        // what lies behind it: counted there (Counts.qml),
+    property string behind: "light"            // this of the picture (Bars.qml)
     property string low: "shadows"             // what the left end is called,
     property string high: "highlights"         // and the right
     property bool rest: true                   // the straight line that changes nothing is drawn (a tone curve has one)
@@ -18,13 +19,17 @@ Item {
     // until it is changed (session.setMaskWhole).
     property bool local: false   // a mask's card: named apart from the whole image's editor
     property int mask: 0
-    readonly property var points: mask > 0 ? (session.masks, session.localWhole(mask, key)) : session[key]
+    // (A mask's, by way of its text: the masks change at every step of a mask being dragged,
+    // and read straight from them this was a new list each time, drawn anew each time, though
+    // nothing of it had changed. A text is only another when what it says is. The owner,
+    // dragging a mask: "render at 50fps".)
+    readonly property string own: mask > 0 ? (session.masks, JSON.stringify(session.localWhole(mask, key))) : ""
+    readonly property var points: mask > 0 ? JSON.parse(own) : session[key]
     function put(list) { if (mask > 0) session.setMaskWhole(mask, key, list); else session.setEdit(key, list) }
     // Drawn only while on show: a graph nobody sees must not cost a frame at every count.
     function paint() { if (visible) plot.requestPaint() }
     onVisibleChanged: paint()
     onLineChanged: paint()
-    onBarsChanged: paint()
     property int held: -1                      // the point being dragged
     property int hot: -1                       // the point under the pointer
     property var base: null                    // the points as they were when the drag began
@@ -47,30 +52,19 @@ Item {
     onShownChanged: paint()
     onPointsChanged: paint()
 
+    // The grid, under the bars (the owner: "the histograms should render on top of the grid").
+    Repeater { model: 5; Rectangle { x: Math.round(root.px(index / 4)); y: root.inset; width: 1; height: root.h; color: Theme.line } }
+    Repeater { model: 5; Rectangle { x: root.inset; y: Math.round(root.py(index / 4)); width: root.w; height: 1; color: Theme.line } }
+    Bars { x: root.inset; y: root.inset + 0.08 * root.h; width: root.w; height: 0.92 * root.h; tally: root.tally; kind: root.behind }
     Canvas {
         id: plot
         objectName: (root.local ? "local-" : "") + root.key + "-plot"
         anchors { left: parent.left; right: parent.right; top: parent.top; bottom: parent.bottom; bottomMargin: 18 }
         onPaint: {
-            const ctx = getContext("2d"), light = root.bars, line = root.line
+            const ctx = getContext("2d"), line = root.line
             ctx.reset()
             if (line.length < 2) return
-            if (light.length) {
-                ctx.fillStyle = Theme.raised
-                ctx.beginPath()
-                ctx.moveTo(root.px(0), root.py(0))
-                for (let i = 0; i < light.length; i++) ctx.lineTo(root.px(i / (light.length - 1)), root.py(light[i] / 255 * 0.92))
-                ctx.lineTo(root.px(1), root.py(0))
-                ctx.fill()
-            }
             ctx.lineWidth = 1
-            ctx.strokeStyle = Theme.line
-            ctx.beginPath()
-            for (let q = 0; q <= 4; q++) {
-                ctx.moveTo(Math.round(root.px(q / 4)) + 0.5, root.py(1)); ctx.lineTo(Math.round(root.px(q / 4)) + 0.5, root.py(0))
-                ctx.moveTo(root.px(0), Math.round(root.py(q / 4)) + 0.5); ctx.lineTo(root.px(1), Math.round(root.py(q / 4)) + 0.5)
-            }
-            ctx.stroke()
             if (root.rest) {
                 ctx.strokeStyle = Theme.faint   // the straight line: no change
                 ctx.setLineDash([2, 4])

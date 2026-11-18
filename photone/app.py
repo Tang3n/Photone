@@ -152,6 +152,7 @@ class Recent:
 class Session(QObject):
     changed = Signal()
     scoped = Signal()  # the histogram was counted anew, or the working range changed
+    brushed = Signal("QVariantMap")  # a painted stroke went on: what the GPU paints (`_brush_on`)
     scopeTaken = Signal()  # a render asked for by `grabScope` is back
     dotted = Signal()  # the wheel's dots are other dots than before
     counted = Signal(int, object)  # from the counting thread: (generation, what it found)
@@ -215,6 +216,7 @@ class Session(QObject):
     def _start_scopes(self) -> None:
         """What is counted from the picture, and what of the interface is open."""
         self._histogram, self._lab, self._after, self._cloud = {}, None, None, None
+        self._inside = None  # which pixels of that count are the wheel's (scopes.inside_of)
         self._range = ("full", 0.0, 1.0)
         self._panels = {"tool": self._kept("view/tool", "tone", str),
                         "clipping": False,
@@ -224,6 +226,9 @@ class Session(QObject):
         # The painted masks' picture: how often it changed and of which strokes, and what
         # was painted last time (a stroke going on is added to that).
         self._paint, self._rasters, self._paint_lock = (0, []), {}, threading.Lock()
+        # A stroke is being made, and how far the piece of it under way has gone (`_brush_on`).
+        self._brushing, self._brush_gone = False, 0.0
+        self._colors = (None, None, 0)  # that picture as it was last made: its shape, bytes, masks
         self.counting = ThreadPoolExecutor(1, "count")  # the scopes, one count after another
         self._wanted, self._wanting = None, threading.Lock()  # the render to count next
         self._grab = None  # the render of the scopes that is under way (`grabScope`)
@@ -320,7 +325,8 @@ class Session(QObject):
         except TypeError:
             return  # not places
         strokes = list(masks[number - 1]["strokes"])
-        if begin or not strokes:
+        begin = begin or not strokes
+        if begin:
             strokes.append({"size": size * frame["size"][0] / max(1, self._stored_size()[0]),
                             "feather": feather, "erase": erase, "points": points})
         else:
@@ -328,7 +334,30 @@ class Session(QObject):
         if len(strokes) > edit.STROKES or len(strokes[-1]["points"]) > edit.REACH:
             return self.say("This mask holds no more strokes. Paint the rest on a second mask.")
         masks[number - 1]["strokes"] = strokes
+        had = 0 if begin else len(strokes[-1]["points"]) - len(points)
+        self._brushing = True   # (before the change is told: the picture is not asked for anew)
         self.setEdits({"masks": masks})
+        self._brush_on(number, had)
+
+    def _brush_on(self, number: int, had: int) -> None:
+        """Tell the interface how the stroke just made longer goes on from its place `had`,
+        for the GPU to paint it (PhotoView.qml, `brush`): as edit.Painter will paint it once
+        it is over, from the places as they are kept."""
+        masks = self.history.edit.get("masks", [])
+        channel = sum(mask["kind"] == "brush" for mask in masks[:number - 1])
+        strokes = masks[number - 1]["strokes"] if number <= len(masks) else []
+        stroke = strokes[-1] if strokes else None
+        if stroke is None or len(stroke["points"]) <= had or channel >= edit.BRUSHES:
+            return  # (the change was not taken)
+        stored = self._stored_size()
+        wide, high = edit.raster_size(stored[0] / max(1, stored[1]))
+        gone = self._brush_gone if had else 0.0
+        steps, self._brush_gone = edit.stretches(stroke, wide, high, had, gone)
+        radius, core = edit.brush_of(stroke, wide)
+        self.brushed.emit({"channel": channel, "begin": had == 0, "radius": radius, "core": core,
+                           "erase": stroke["erase"], "wide": wide, "high": high,
+                           "steps": [[*map(float, a), *map(float, b), bool(turn)]
+                                     for a, b, turn in steps]})
 
     @property
     def luts(self) -> Path:
@@ -600,7 +629,10 @@ class Session(QObject):
         address whenever a stroke was added. Empty when the photo has none."""
         strokes = [mask["strokes"] for mask in self.history.edit.get("masks", [])
                    if mask["kind"] == "brush"]
-        if strokes != self._paint[1]:
+        # (Not while a stroke is being made: the GPU paints it meanwhile, and its picture is
+        # asked for when it is over. Made at every move of the brush, a large one cost
+        # milliseconds a stretch and the whole picture went to the GPU each time.)
+        if not self._brushing and strokes != self._paint[1]:
             self._paint = (self._paint[0] + 1, strokes)
         return f"image://photo/painted/{self._generation}/{self._paint[0]}" if strokes else ""
 
@@ -609,14 +641,25 @@ class Session(QObject):
         in each of red, green and blue (edit.painted). A stroke going on is painted onto
         what was kept from last time, not everything anew."""
         wide, high = edit.raster_size(shape)
-        colors = np.zeros((high, wide, 4), dtype=np.uint8)
-        colors[..., 3] = 255
         with self._paint_lock:
+            # (Kept, and only where a stroke went on written anew: made whole at every move
+            # of the brush it was some milliseconds of each frame.)
+            was, colors, used = self._colors
+            if was != shape:
+                colors, used = np.zeros((high, wide, 4), dtype=np.uint8), 0
+                colors[..., 3] = 255
             for channel, mine in enumerate(strokes[:edit.BRUSHES]):
-                colors[..., channel] = self._raster(channel, mine, shape)
-        return QImage(colors.data, wide, high, wide * 4, QImage.Format.Format_RGBX8888).copy()
+                painter, anew = self._raster(channel, mine, shape)
+                shown = painter.bytes()
+                box = (slice(None), slice(None)) if anew or was != shape else painter.fresh
+                if box:
+                    colors[(*box, channel)] = shown[box]
+            colors[..., len(strokes):max(used, len(strokes))] = 0  # (of masks that are gone)
+            self._colors = (shape, colors, min(len(strokes), edit.BRUSHES))
+            return QImage(colors.data, wide, high, wide * 4, QImage.Format.Format_RGBX8888).copy()
 
-    def _raster(self, channel: int, strokes: list, shape: float) -> np.ndarray:
+    def _raster(self, channel: int, strokes: list, shape: float) -> tuple:
+        """That mask's painter with these strokes on it, and whether it was begun anew."""
         shape_was, old, painter = self._rasters.get(channel, (None, [], None))
         same = shape_was == shape and strokes and painter is not None
         grown = same and len(strokes) == len(old) and strokes[:-1] == old[:-1] \
@@ -634,7 +677,7 @@ class Session(QObject):
                 painter.begin()
                 painter.add(stroke)
         self._rasters[channel] = (shape, strokes, painter)
-        return painter.bytes()
+        return painter, not (grown or (same and strokes[:-1] == old))
 
     @Slot(int)
     def deleteMask(self, number: int) -> None:  # noqa: N802
@@ -835,6 +878,7 @@ class Session(QObject):
         self._panels = {**self._panels, "chart": False}
         self._camera, self._raw, self._small, self._histogram = None, False, None, {}
         self._lab, self._after, self._range = None, None, ("full", 0.0, 1.0)
+        self._inside = None
         self._redot()
         self.history = self._history()
         self._generation += 1  # a new address, so a file opened twice is read twice
@@ -1044,7 +1088,10 @@ class Session(QObject):
     def edit(self) -> dict:
         """Every setting's value now, the white balance as numbers also when it is as shot."""
         def whole() -> dict:
-            values = {**edit.DEFAULTS, **self.history.edit}
+            # (The masks as `masks` has them, without the strokes of painted ones: thousands
+            # of numbers that the interface took in at every change of anything, and reads
+            # none of. With a painted mask a curve dragged ran at 30 frames a second.)
+            values = {**edit.DEFAULTS, **self.history.edit, "masks": self.masks}
             return {**values, **{k: v for k, v in self.shot.items() if values[k] is None}}
 
         return self._once("edit", whole)
@@ -1231,6 +1278,7 @@ class Session(QObject):
     @Slot()
     def commitEdit(self) -> None:  # noqa: N802
         """The gesture is over (a slider let go): what follows is another undo step."""
+        self._brushing = False
         self.history.commit()
         self.refresh()
 
@@ -1332,6 +1380,7 @@ class Session(QObject):
         with the next photo, so that nobody finds a chart where a photo should be."""
         self._panels = {**self._panels, "chart": on and bool(self.photos)}
         self._lab, self._after, self._histogram = None, None, {}  # counted from the other picture
+        self._inside = None
         self._redot()
         self.refresh()
         self.photoChanged.emit()  # the view starts afresh: the two are not of one shape
@@ -1423,15 +1472,18 @@ class Session(QObject):
         with self._wanting:
             (generation, rows, asked), self._wanted = self._wanted, None
         before, after = scopes.lab_of(rows), scopes.lab_of(rows, pinned=True)
-        cloud = scopes.cloud_of(*(after if asked[3] else before), asked[1:3])
-        counts = {**scopes.histogram_of(rows), **scopes.spread_of(*before)}
-        self.counted.emit(generation, (counts, before, after, cloud, asked))
+        inside = scopes.inside_of(rows)
+        cloud = scopes.cloud_of(*(after if asked[3] else before), asked[1:3], inside)
+        # (All of it by the mask whose pins are worked on, where there is one: the owner's wish.)
+        counts = {**scopes.histogram_of(rows, inside),
+                  **scopes.spread_of(*(tile[inside] for tile in before))}
+        self.counted.emit(generation, (counts, before, after, cloud, asked, inside))
 
     def _counted(self, generation: int, found: tuple) -> None:
         """On the session's own thread: take the count in, unless the photo has changed."""
         if generation != self._generation:
             return
-        self._histogram, self._lab, self._after, cloud, asked = found
+        self._histogram, self._lab, self._after, cloud, asked, self._inside = found
         self.scoped.emit()
         if asked != self._asked():
             return self._redot()  # the range, the view or the choice moved meanwhile
@@ -1456,7 +1508,8 @@ class Session(QObject):
         if self._cloud is None:
             empty = np.zeros(0, np.float32)
             shown = self._after if self._panels["live"] else self._lab
-            self._cloud = scopes.cloud_of(*(shown or (empty, empty, empty)), self._range[1:])
+            self._cloud = scopes.cloud_of(*(shown or (empty, empty, empty)), self._range[1:],
+                                          self._inside if shown else None)
         return self._cloud
 
     @Property("QVariantMap", notify=dotted)
@@ -1888,7 +1941,11 @@ def make_view(session: Session, library: Library | None = None,
     for name, file in (("pipelineShader", "pipeline.frag"), ("pipelineVertex", "pipeline.vert"),
                        ("wheelShader", "wheel.frag"), ("wheelVertex", "wheel.vert"),
                        ("ovalShader", "oval.frag"), ("ovalVertex", "oval.vert"),
-                       ("dotsShader", "dots.frag"), ("dotsVertex", "dots.vert")):
+                       ("dotsShader", "dots.frag"), ("dotsVertex", "dots.vert"),
+                       ("tallyShader", "tally.frag"), ("tallyVertex", "tally.vert"),
+                       ("barsShader", "bars.frag"), ("barsVertex", "bars.vert"),
+                       ("brushShader", "brush.frag"), ("brushVertex", "brush.vert"),
+                       ("brushedShader", "brushed.frag"), ("brushedVertex", "brushed.vert")):
         url = QUrl.fromLocalFile(str(shaders.compiled(file)))
         context.setContextProperty(name, url.toString())
     view.setSource(QUrl.fromLocalFile(str(UI / "Main.qml")))

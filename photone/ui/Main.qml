@@ -757,29 +757,14 @@ Rectangle {
         Scrollbar { id: toolsBar; of: scroller; step: 150; visible: false }
         MoreBelow { objectName: "tools-more"; of: scroller; ground: Theme.bg; z: 2; height: 120; x: 1; width: parent.width - 1; anchors.bottom: parent.bottom }   // (long and into the dark of the window, to be plain: the owner's wish)
         MoreBelow { above: true; of: scroller; ground: Theme.panel; z: 2; height: 28; x: 1; width: parent.width - 1; y: scrollArea.y }
-        Item {   // (what scrolls is cut off above and below, but a section's ground reaches to the column's sides)
-        id: scrollArea
-        anchors { left: parent.left; right: parent.right; top: parent.top; bottom: parent.bottom; topMargin: 12 }
-        clip: true
-        Flickable {
-            id: scroller
-            objectName: "tools-scroll"
-            anchors { fill: parent; leftMargin: 16; rightMargin: 16 }
-            // (The last card ends as far above the panel's foot as the cards are from its
-            // sides, 6 px: a card's own foot leaves 18 below it open, 10 folded.)
-            readonly property real tail: (root.mode === "edit" ? !grainPanel.open : root.mode === "masks" && wheelBlock.visible && !wheelBlock.open) ? 10 : 18
-            contentHeight: develop.height - (tail - 6)
-            // (Never left scrolled past its end when what it holds gets shorter, and at its top
-            // when another tab is chosen: it showed nothing, and nothing there took a click.)
-            onContentHeightChanged: contentY = Math.max(0, Math.min(contentY, contentHeight - height))
-            Connections { target: root; function onModeChanged() { scroller.contentY = 0 } }
-            boundsBehavior: Flickable.StopAtBounds; acceptedButtons: Qt.NoButton
-            // (Under everything that scrolls here: the wheel, where nothing else wants it.)
-            MouseArea { anchors.fill: parent; z: -1; acceptedButtons: Qt.NoButton; onWheel: (wheel) => { scrolling.restart(); toolsBar.turned(wheel) } }
-            Timer { id: scrolling; interval: 400 }   // the column was scrolled a moment ago
+        // The head of the column stays where it is: undo, redo, Reset all, and the tabs; what
+        // is under it scrolls away beneath it and fades out at its foot (the owner: "this whole
+        // part of the panel ... should be static (pinned) and the rest of the content slides
+        // underneath").
         Column {
-            id: develop
-            width: parent.width
+            id: toolsHead
+            objectName: "tools-head"
+            x: 16; y: 12; width: parent.width - 32
             spacing: 0
             Item {
                 width: parent.width; height: 32
@@ -829,6 +814,31 @@ Rectangle {
                     }
                 }
             }
+        }
+        Item {   // (what scrolls is cut off above and below, but a section's ground reaches to the column's sides)
+        id: scrollArea
+        anchors { left: parent.left; right: parent.right; top: toolsHead.bottom; bottom: parent.bottom }
+        clip: true
+        Flickable {
+            id: scroller
+            objectName: "tools-scroll"
+            anchors { fill: parent; leftMargin: 16; rightMargin: 16 }
+            // (The last card ends as far above the panel's foot as the cards are from its
+            // sides, 6 px: a card's own foot leaves 18 below it open, 10 folded.)
+            readonly property real tail: (root.mode === "edit" ? !grainPanel.open : root.mode === "masks" && wheelBlock.visible && !wheelBlock.open) ? 10 : 18
+            contentHeight: develop.height - (tail - 6)
+            // (Never left scrolled past its end when what it holds gets shorter, and at its top
+            // when another tab is chosen: it showed nothing, and nothing there took a click.)
+            onContentHeightChanged: contentY = Math.max(0, Math.min(contentY, contentHeight - height))
+            Connections { target: root; function onModeChanged() { scroller.contentY = 0 } }
+            boundsBehavior: Flickable.StopAtBounds; acceptedButtons: Qt.NoButton
+            // (Under everything that scrolls here: the wheel, where nothing else wants it.)
+            MouseArea { anchors.fill: parent; z: -1; acceptedButtons: Qt.NoButton; onWheel: (wheel) => { scrolling.restart(); toolsBar.turned(wheel) } }
+            Timer { id: scrolling; interval: 400 }   // the column was scrolled a moment ago
+        Column {
+            id: develop
+            width: parent.width
+            spacing: 0
             // (Less under the tabs where the profile's row follows, which has room of its own
             // round its words: the two gaps, over it and under it, then look alike.)
             Item { width: 1; height: root.mode === "edit" && session.develops ? 8 : 16 }
@@ -892,7 +902,7 @@ Rectangle {
                                     visible: stage.ready
                                     source: stage.picture; painted: stage.painted; lutPicture: stage.lut
                                     // (Worked out only while the tab is on show: every change of the edit asks for it anew.)
-                                    edit: root.mode === "presets" ? (session.uniforms, session.numbersWith(tile.modelData.look, tile.modelData.parts)) : session.uniforms
+                                    edit: root.mode === "presets" ? (session.uniforms, session.numbersWith(tile.modelData.look, tile.modelData.parts)) : null
                                     peak: 1; hdrLift: 0; clipping: 0
                                 }
                             }
@@ -1173,7 +1183,8 @@ Rectangle {
                 Item { width: 1; height: 16 }
                 CurveEditor {
                     width: parent.width; height: 220; onDone: root.forceActiveFocus()
-                    key: "curve"; local: true; mask: wheel.mask; line: (session.masks, session.localLine(wheel.mask, "curve")); bars: (session.bars.light || [])
+                    key: "curve"; local: true; mask: wheel.mask; readonly property string lineText: (session.masks, JSON.stringify(session.localLine(wheel.mask, "curve"))); line: JSON.parse(lineText);   // (by way of its text: CurveEditor.qml says why)
+                    tally: counts; behind: "light"
                 }
             }
             LocalCard {
@@ -1191,14 +1202,15 @@ Rectangle {
             LocalCard {
                 objectName: "panel:local-eq"
                 title: "Color EQ"; card: "eq"; keys: ["eq"]; tinted: true
-                HueEditor { width: parent.width; height: 200; onDone: root.forceActiveFocus(); local: true; mask: wheel.mask }
+                HueEditor { width: parent.width; height: 200; onDone: root.forceActiveFocus(); local: true; mask: wheel.mask; tally: counts }
             }
             LocalCard {
                 objectName: "panel:local-chroma"
                 title: "Chroma curve"; card: "chroma"; keys: ["chroma"]; tinted: true
                 CurveEditor {
                     width: parent.width; height: 220; onDone: root.forceActiveFocus()
-                    key: "chroma"; local: true; mask: wheel.mask; line: (session.masks, session.localLine(wheel.mask, "chroma")); bars: (session.bars.chroma || [])
+                    key: "chroma"; local: true; mask: wheel.mask; readonly property string lineText: (session.masks, JSON.stringify(session.localLine(wheel.mask, "chroma"))); line: JSON.parse(lineText);
+                    tally: counts; behind: "chroma"
                     low: "muted"; high: "vivid"
                 }
             }
@@ -1210,7 +1222,7 @@ Rectangle {
                 folds: true; open: root.isOpen("tone"); onFold: root.fold("tone")
                 // The histogram is here, over what moves it (the owner: "the histogram should
                 // probably be a part of the LIGHT card"); it was a card of the left panel.
-                Histogram { width: parent.width; height: 110; color: "transparent"; border.width: 0 }
+                Histogram { width: parent.width; height: 110; color: "transparent"; border.width: 0; tally: counts }
                 OnOff {
                     objectName: "clipping-switch"
                     label: "Show clipping"
@@ -1239,7 +1251,7 @@ Rectangle {
                 Item { width: 1; height: 16 }
                 CurveEditor {
                     width: parent.width; height: 250; onDone: root.forceActiveFocus()
-                    key: "curve"; line: session.curveLine; bars: (session.bars.light || [])
+                    key: "curve"; line: session.curveLine; tally: counts; behind: "light"
                 }
             }
             Panel {
@@ -1742,14 +1754,14 @@ Rectangle {
                     textFormat: Text.StyledText
                     text: monoPanel.lit ? "<b>" + monoPanel.lit[1] + "</b>: " + monoPanel.lit[2] + "." : "<b>Your own</b>: a look changed in the graph below."
                 }
-                HueEditor { width: parent.width; height: 230; gray: true; onDone: root.forceActiveFocus() }
+                HueEditor { width: parent.width; height: 230; gray: true; onDone: root.forceActiveFocus(); tally: counts }
             }
             Panel {
                 objectName: "panel:eq"
                 id: eqPanel
                 title: "Color EQ"; tool: "eq"; card: "eq"; visible: session.source !== "" && root.shows("eq")
                 folds: true; open: root.isOpen("eq"); onFold: root.fold("eq")
-                HueEditor { width: parent.width; height: 220; onDone: root.forceActiveFocus() }
+                HueEditor { width: parent.width; height: 220; onDone: root.forceActiveFocus(); tally: counts }
             }
             Panel {
                 objectName: "panel:chroma"
@@ -1758,7 +1770,7 @@ Rectangle {
                 folds: true; open: root.isOpen("chroma"); onFold: root.fold("chroma")
                 CurveEditor {
                     width: parent.width; height: 250; onDone: root.forceActiveFocus()
-                    key: "chroma"; line: session.chromaLine; bars: (session.bars.chroma || [])
+                    key: "chroma"; line: session.chromaLine; tally: counts; behind: "chroma"
                     low: "muted"; high: "vivid"
                 }
             }
@@ -1952,7 +1964,7 @@ Rectangle {
                     y: wheel.y + wheel.height + 8; width: parent.width
                     objectName: "lightness"
                     visible: wheelBlock.open
-                    bars: (wheel.cloud.light || [])
+                    tally: counts
                     // The pin being worked on: lighter or darker.
                     held: wheel.selected >= 0
                     shift: held ? wheel.pins[wheel.selected].light : 0
@@ -2081,7 +2093,7 @@ Rectangle {
                 }
                 CurveEditor {
                     width: parent.width; height: 170; onDone: root.forceActiveFocus()
-                    key: "grainCurve"; line: session.grainLine; bars: (session.bars.light || []); rest: false
+                    key: "grainCurve"; line: session.grainLine; tally: counts; behind: "light"; rest: false
                 }
                 Label {
                     width: parent.width; height: implicitHeight + 14; verticalAlignment: Text.AlignBottom; wrapMode: Text.WordWrap; font.pixelSize: 12; color: Theme.faint
@@ -2301,7 +2313,7 @@ Rectangle {
         source: stage.picture; sharp: stage.picture; useSharp: 0; painted: stage.painted; lutPicture: stage.lut
         property var numbers: session.inFrame
         property var layers: []
-        edit: numbers
+        follows: true; edit: numbers
         peak: 1; hdrLift: 0; linearOut: 0; clipping: 0
         Local { over: keeper; layers: keeper.layers }
         Component.onCompleted: take()   // (assignments: from here on only `keep` sets them)
@@ -2363,7 +2375,8 @@ Rectangle {
             MouseArea { anchors.fill: parent; onClicked: session.setPanel("chart", false) }
         }
     }
-    Scopes { objectName: "scopes"; z: 5; source: stage.picture; painted: stage.painted; lut: stage.lut; ready: stage.ready }   // (shots show it for a moment)
+    Counts { id: counts; objectName: "counts"; mask: wheel.mask; source: stage.picture; painted: stage.painted; lut: stage.lut; colors: wheel.colors; port: scroller }
+    Scopes { objectName: "scopes"; z: 5; mask: wheel.mask; source: stage.picture; painted: stage.painted; lut: stage.lut; ready: stage.ready }   // (shots show it for a moment)
     Column {
         anchors.centerIn: stage; spacing: 10
         visible: (session.source === "" || root.photoFailed) && root.editing

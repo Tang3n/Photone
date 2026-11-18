@@ -1828,7 +1828,7 @@ def check_session_tools() -> None:
 
     # The renders arrive as four tiles; the session keeps what was counted from them.
     image = QImage(12, 8, QImage.Format.Format_RGBA8888)
-    image.fill(QColor(10, 20, 30))
+    image.fill(QColor(10, 20, 200))  # (blue: of the tile beside b, the pixel counts)
     session.setScope(image)  # counted on a thread of its own; the result comes as an event
     limit = time.monotonic() + 5
     while not session.histogram and time.monotonic() < limit:
@@ -2125,6 +2125,7 @@ def check_painted() -> None:
     going = edit.Painter(1.5)
     going.begin()
     going.add({**line, "points": line["points"][:2]})
+    going.bytes()  # (as the picture is made at every move: then only what the rest adds is made anew)
     going.add(line, 2)
     assert (edit.painted([line], 1.5) == going.bytes()).all(), "a stroke going on is the stroke painted whole"
     # Two soft edges lying over each other run into one another: more there than either has

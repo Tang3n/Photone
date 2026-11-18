@@ -53,7 +53,8 @@ Item {
         width: bench.job.width || 1; height: bench.job.height || 1
         source: full; painted: bench.job.painted ? brushed : full
         lutPicture: bench.job.lut && table.status === Image.Ready && table.sourceSize.width > 1 ? table : null
-        edit: bench.within >= 0 && bench.job.layers ? bench.job.layers[bench.within].numbers : bench.job.uniforms || session.uniforms
+        follows: true
+        edit: !bench.loaded ? null : bench.within >= 0 && bench.job.layers ? bench.job.layers[bench.within].numbers : bench.job.uniforms || session.uniforms
         peak: 1; hdrLift: 0; linearOut: 0; clipping: 0
         Local { over: render; layers: bench.job.layers || [] }
     }

@@ -10,7 +10,7 @@ Item {
     id: root
     property real probe: -1          // the lightness under the pointer (0..1), or none
     readonly property var range: session.range
-    property var bars: []            // how much of the photo is how light, dark first: heights 0..255
+    property Item tally              // what counts how much of the photo is how light (Counts.qml)
     property bool held: false        // a pin is being worked on
     property real shift: 0           // how much lighter (or, below zero, darker) it makes its colors
     signal moved(real shift)
@@ -18,7 +18,6 @@ Item {
     signal reset()
     height: 44
     Accessible.role: Accessible.Graphic; Accessible.name: "Lightness of the photo"
-    onBarsChanged: plot.requestPaint()
     // One box: how much of the photo is how light, standing on a band that runs from black to
     // white, so that each bar stands over the gray it counts. Its name and the pin's shift in
     // the corners, as on a card. (It was a row of bars with a separate strip under them that
@@ -32,24 +31,7 @@ Item {
         id: box
         anchors.fill: parent; radius: 5; color: Theme.bg; border { width: 1; color: Theme.line }
     }
-    Canvas {
-        id: plot
-        x: 6; y: 3; width: parent.width - 12; height: parent.height - root.band - root.gap - 8
-        onPaint: {
-            const ctx = getContext("2d")
-            ctx.reset()
-            if (!root.bars.length) return
-            ctx.fillStyle = Theme.faint
-            ctx.beginPath()
-            ctx.moveTo(0, height)
-            // (A line through the middle of each count, not a step for each: as steps, a photo
-            // with much of one gray showed square blocks; the owner: "random squares".)
-            for (let i = 0; i < root.bars.length; i++)
-                ctx.lineTo((i + 0.5) / root.bars.length * width, height - root.bars[i] / 255 * (height - 2))
-            ctx.lineTo(width, height)
-            ctx.fill()
-        }
-    }
+    Bars { x: 6; y: 5; width: parent.width - 12; height: parent.height - root.band - root.gap - 10; tally: root.tally; kind: "strip" }
     Rectangle {
         id: strip
         objectName: "lightness-strip"

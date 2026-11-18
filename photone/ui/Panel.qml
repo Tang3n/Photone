@@ -64,7 +64,7 @@ Column {
         }
         Rectangle {   // it has changed the photo: said on its head, folded or open
             id: dot
-            visible: panel.local ? panel.changed : panel.folds && panel.tool !== "" && session.adjusted[panel.tool] === true
+            visible: panel.local ? panel.changed : panel.folds && panel.tool !== "" && panel.altered
             // (8 px on the new screen's cards, where titles and icons are larger; the owner:
             // "a bigger dot for consistency with the rest of the UI".)
             readonly property real size: panel.card !== "" ? 8 : 5

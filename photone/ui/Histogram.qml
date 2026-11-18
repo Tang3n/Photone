@@ -6,34 +6,13 @@ import "."
 // left, white on the right), which is where detail is lost.
 Rectangle {
     id: root
-    readonly property var counts: session.bars
+    readonly property var counts: session.bars   // the corners only: counted once a change is over (Scopes.qml)
     width: 244; height: 112; radius: 8
     color: Qt.rgba(Theme.panel.r, Theme.panel.g, Theme.panel.b, 0.88)
     border { width: 1; color: Theme.line }
     Accessible.role: Accessible.Graphic; Accessible.name: "Histogram"
-    // Drawn only while on show: a graph nobody sees must not cost a frame at every count.
-    function paint() { if (visible) plot.requestPaint() }
-    onVisibleChanged: paint()
-    onCountsChanged: paint()
-    Canvas {
-        id: plot
-        anchors { fill: parent; margins: 8; topMargin: 14 }
-        onPaint: {
-            const ctx = getContext("2d")
-            ctx.reset()
-            if (!root.counts.r) return
-            ctx.globalCompositeOperation = "lighter"   // where all three overlap it reads gray
-            for (const [name, color] of [["r", Theme.red], ["g", Theme.green], ["b", Theme.blue]]) {
-                const bars = root.counts[name]
-                ctx.fillStyle = color
-                ctx.beginPath()
-                ctx.moveTo(0, height)
-                for (let i = 0; i < 256; i++) ctx.lineTo(i / 255 * width, height - bars[i] / 255 * height)
-                ctx.lineTo(width, height)
-                ctx.fill()
-            }
-        }
-    }
+    property Item tally   // what counts it (Counts.qml)
+    Bars { objectName: "histogram-bars"; anchors { fill: parent; margins: 8; topMargin: 14 } tally: root.tally; kind: "rgb" }
     component Corner: Rectangle {
         property real share
         property string what

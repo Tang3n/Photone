@@ -21,6 +21,7 @@ Look at the PNGs after every visual change: a passing audit is not a good-lookin
 import faulthandler
 import math
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -31,7 +32,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from PySide6.QtCore import Q_ARG, QCoreApplication, QElapsedTimer, QEvent, QEventLoop, QMetaObject, QObject, QPoint, QPointF, QRectF, QSettings, Qt, qInstallMessageHandler  # noqa: E402
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QKeyEvent, QMouseEvent, QPainter, QWheelEvent  # noqa: E402
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QKeyEvent, QMouseEvent, QPainter, QSurfaceFormat, QWheelEvent  # noqa: E402
+from PySide6.QtQuick import QSGRendererInterface  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "tests"))
@@ -1903,6 +1905,65 @@ def audit_color_tools() -> list[str]:
     return faults
 
 
+def audit_mask_wheel() -> list[str]:
+    """With a mask chosen the wheel shows only the colors that mask reaches: what is counted
+    of them (Fit, the lightness strip) and the dots themselves; with none chosen, all again."""
+    session = ui.Session([Path("first.arw")], load=chart)
+    view, root = opened(session, "masks")
+    faults = Faults()
+    wheel = find(root, "wheel")
+    session.setEdits({"masks": [{"kind": "radial", "at": [0.2, 0.3], "to": [0.26, 0.3], "ratio": 1.0, "feather": 0.2}]})
+    session.commitEdit()
+
+    def seen(mask: int) -> tuple[dict, QImage]:
+        wheel.setProperty("mask", mask)
+        settle()
+        bring(root, "wheel-block")
+        faults.expect(counted(view, session), "the scopes were not counted")
+        area = box(wheel).toRect()
+        return session.cloud, view.grabWindow().copy(area)
+
+    def wide(box_: list) -> float:
+        return (box_[1] - box_[0]) * (box_[3] - box_[2])
+
+    whole = seen(0)[0]  # (the wheel is not on show in this tab until a mask is chosen)
+    bars = session.histogram["g"]
+    part, drawn = seen(1)
+    faults.expect(0 < len(part["colors"]) < len(whole["colors"]) / 3,
+                  f"a small mask chosen: {len(part['colors'])} of the photo's {len(whole['colors'])} dots are counted")
+    faults.expect(session.histogram["g"] != bars, "the histogram is the same with a small mask chosen as for the whole photo")
+    faults.expect(wide(part["box"]) < wide(whole["box"]) / 3, f"Fit would frame {part['box']} for the mask, {whole['box']} for the photo")
+    session.setMask(1, {"invert": True})
+    session.commitEdit()
+    rest, rest_drawn = seen(1)
+    faults.expect(drawn != rest_drawn, "the dots drawn on the wheel are the same for a mask and for all that is outside it")
+    drawn.save(str(OUT / "mask-wheel-inside.png")), rest_drawn.save(str(OUT / "mask-wheel-outside.png"))
+    faults.expect(len(rest["colors"]) > len(part["colors"]) * 2, f"the mask turned inside out counts {len(rest['colors'])} dots, the mask itself {len(part['colors'])}")
+    back = seen(0)[0]
+    faults.expect(len(back["colors"]) == len(whole["colors"]), f"no mask chosen any more: {len(back['colors'])} dots, not the photo's {len(whole['colors'])}")
+    # And on the photo the chosen mask lies in red while the pointer is on the photo, a radial
+    # one as a painted one does; it fades, so it is looked at a moment later.
+    session.setMask(1, {"invert": False})
+    session.commitEdit()
+    wheel.setProperty("mask", 1)
+    area = box(find(root, "photo"))
+    place = lambda u, w: QPoint(int(area.left() + u * area.width()), int(area.top() + w * area.height()))  # noqa: E731
+
+    def red(pointer: QPoint) -> float:  # how much redder than green and blue the photo is inside the mask
+        QTest.mouseMove(view, pointer)
+        wait(lambda: False, 400)
+        r, g, b = view.grabWindow().pixelColor(place(0.225, 0.275)).getRgb()[:3]
+        return r - (g + b) / 2
+
+    off, on = red(QPoint(30, 30)), red(place(0.8, 0.8))
+    view.grabWindow().save(str(OUT / "mask-red.png"))  # (to be looked at)
+    gone = red(QPoint(30, 30))
+    faults.expect(on > off + 25, f"with the pointer on the photo a radial mask is not laid over it in red: {off:.0f}, then {on:.0f}")
+    faults.expect(abs(gone - off) < 3, f"with the pointer off the photo again the red stays: {gone:.0f}, before {off:.0f}")
+    ui.close_view(view)
+    return faults
+
+
 def audit_test_chart() -> list[str]:
     """The test chart in the photo's place, by its switch: the chart is what is shown and said
     loudly, the photo's edit works on it, the scopes count it, the way back works, and another
@@ -3664,6 +3725,9 @@ def fourth_masks(view, root, session, faults) -> None:
     moves(view, place(0.2, 0.3), [QPoint(int(0.02 * k * area.width()), 0) for k in range(1, 16)])
     kept = session.history.edit["masks"][0]["strokes"]
     faults.expect(len(kept) == 1 and len(kept[0]["points"]) > 5, f"a stroke of the brush kept {[len(k['points']) for k in kept]} places")
+    # (All of its places handed to the interface at every change of anything: a curve dragged
+    # on a photo with a painted mask ran at 30 frames a second.)
+    faults.expect(session.edit["masks"][0]["strokes"] == 1, "the interface is handed the strokes of a painted mask, not how many there are")
     QTest.mouseMove(view, QPoint(30, 30))  # (off the photo: the mask's red is gone)
     settle()
 
@@ -4767,6 +4831,19 @@ def audit_scopes() -> list[str]:
                   f"the chart's white and black steps are not counted: over {seen['over']:.3f}, under {seen['under']:.3f}")
     faults.expect(find(root, "clip:white").property("lit") and find(root, "clip:black").property("lit"),
                   "the histogram's corners do not light up for pixels at white and black")
+    # The graph itself is the GPU's (Counts.qml, Bars.qml): the same heights as numpy counts.
+    show(root, "tone")
+    view.grabWindow()
+    settle()
+    drawn = export.bytes_of(view.grabWindow().copy(box(find(root, "histogram-bars")).toRect()))[..., 0] > 180
+    reds = drawn.mean(axis=0)  # how much of each column is red, or red under another color
+    bins, spread = np.arange(1, 255), np.exp(-np.arange(-8, 9) ** 2 / (2 * 1.6 ** 2))
+    smooth = {c: np.convolve(np.asarray(seen[c])[1:255], spread, "same")
+              / np.convolve(np.ones(254), spread, "same") for c in "rgb"}
+    want = np.interp(np.arange(drawn.shape[1]) / (drawn.shape[1] - 1) * 255, bins,
+                     smooth["r"] / max(1e-9, *(v.max() for v in smooth.values())))
+    off = float(np.abs(reds - want)[3:-3].mean()) if seen["g"] != [0] else 1.0
+    faults.expect(off < 0.03, f"the histogram the GPU draws is not what numpy counts: {off:.3f} of its height off")
     session.setEdit("exposure", -2.0)
     counted(view, session)
     settle()
@@ -4884,10 +4961,78 @@ def sheet(names: list[str], title: str) -> None:
 
 
 # What is tried with real events on a window of its own, beside the shots.
+def brush_on_gpu() -> list[str]:
+    """A stroke as the GPU paints it while it is made (ui/brush.frag) is the stroke numpy
+    paints once it is over (edit.Painter), to a step of 255: over nothing, over an older
+    stroke, rubbing out, begun before the last one's picture has come, many places at once.
+    In a window that is shown (`audit_brush` says where): one that is not keeps no picture
+    from a frame to the next, and the brush paints each step onto the one before."""
+    session = ui.Session([Path("first.arw")], load=chart)
+    view, root = opened(session)
+    view.show()
+    settle()
+    if view.rendererInterface().graphicsApi() == QSGRendererInterface.GraphicsApi.Software:
+        return []  # (no GPU to be had here: nothing to compare)
+    session.addMask("brush")
+    session.commitEdit()
+    settle()
+    brush, faults = find(root, "brush"), Faults()
+    stage = box(find(root, "box:stage")).toRect().adjusted(8, 8, -8, -140)  # (clear of what lies over the photo)
+
+    def painted_there() -> np.ndarray:
+        wait(lambda: not brush.property("stepping") and not brush.property("waiting").toVariant(), 5000)
+        settle()
+        mix = find(root, "brush-mix")
+        wide, high = int(mix.width()), int(mix.height())
+        out = np.zeros((high, wide), dtype=int)
+        brush.setProperty("clip", False), brush.setZ(99), mix.setVisible(True)
+        origin = mix.mapToScene(QPointF(0, 0))
+        for top in range(0, high, stage.height()):   # (read off the window, a tile at a time)
+            for left in range(0, wide, stage.width()):
+                mix.setX(stage.left() - origin.x() - left), mix.setY(stage.top() - origin.y() - top)
+                view.grabWindow()
+                tile = export.bytes_of(view.grabWindow().copy(stage))[:high - top, :wide - left, 0]
+                out[top:top + tile.shape[0], left:left + tile.shape[1]] = tile
+        mix.setVisible(False), brush.setProperty("clip", True), brush.setZ(0), mix.setX(0), mix.setY(0)
+        return out
+
+    def stroke(what: str, size: float, feather: float, erase: bool, places: list, each: int = 3) -> None:
+        session.paint(1, [places[0]], size, feather, erase, True)
+        for k in range(1, len(places), each):
+            session.paint(1, places[k:k + each], size, feather, erase, False)
+            if k % 9 == 1:
+                settle()
+        wide, high = session._stored_size()
+        there = painted_there()
+        off = np.abs(there - edit.painted(session.history.edit["masks"][0]["strokes"], wide / high).astype(int))
+        faults.expect(there.max() == 255 and off.max() <= 1,
+                      f"{what}: the GPU's stroke is not numpy's, up to {off.max()} of 255 off in {int((off > 1).sum())} pixels")
+        session.commitEdit()
+
+    stroke("a wave", 0.05, 0.5, False, [[0.1 + 0.8 * t, 0.5 + 0.3 * math.sin(9 * t)] for t in np.linspace(0, 1, 120)])
+    faults.expect(wait(lambda: not brush.property("on"), 8000), "the stroke's picture never comes, once it is over")
+    settle()
+    stroke("a large soft stroke over it", 0.12, 0.9, False, [[0.2, 0.2], [0.8, 0.8], [0.8, 0.2], [0.2, 0.8]]
+           + [[0.2 + 0.6 * t, 0.8 - 0.1 * t] for t in np.linspace(0, 1, 40)])
+    stroke("rubbing out, begun at once", 0.03, 0.3, True, [[0.5 + 0.3 * math.cos(a), 0.5 + 0.3 * math.sin(a)] for a in np.linspace(0, 12, 200)])
+    stroke("a thin stroke, thirty places at a time", 0.004, 0.5, False, np.random.default_rng(3).uniform(0.1, 0.9, (150, 2)).tolist(), each=30)
+    faults.expect(wait(lambda: not brush.property("on"), 8000), "the last stroke's picture never comes")
+    return faults
+
+
+def audit_brush() -> list[str]:
+    """`brush_on_gpu`, in a process of its own whose window is shown where nobody sees it (Qt's
+    offscreen platform, with the GPU all the same)."""
+    done = subprocess.run([sys.executable, __file__, "--brush"], capture_output=True, text=True, timeout=300, check=False,
+                          env={**os.environ, "QT_QPA_PLATFORM": "offscreen", "QT_QUICK_BACKEND": "rhi"})
+    said = [line[7:] for line in done.stdout.splitlines() if line.startswith("FAULT: ")]
+    return said or ([] if done.returncode == 0 else [f"the brush check ended badly: {done.stderr.strip()[-300:]}"])
+
+
 AUDITS = {"(keys)": audit_stepping, "(column)": audit_column, "(wheel)": audit_wheel,
           "(wheel data)": audit_wheel_data, "(dots)": audit_dots_place, "(pixels)": audit_pixels, "(colors data)": audit_colors_data, "(pins)": audit_pins,
           "(pin panel)": audit_pin_panel,
-          "(masks)": audit_masks, "(masks data)": audit_masks_data, "(moves)": audit_moves, "(scroll)": audit_scroll, "(resume)": audit_resume, "(strip)": audit_strip, "(local)": audit_local, "(fourth)": audit_fourth, "(mono)": audit_mono, "(detail)": audit_detail, "(lens)": audit_lens, "(fringes)": audit_fringes, "(mark)": audit_mark, "(grain)": audit_grain, "(look)": audit_look, "(presets)": audit_presets, "(lut)": audit_lut, "(table)": audit_table, "(menu)": audit_menu, "(color tools)": audit_color_tools,
+          "(masks)": audit_masks, "(brush)": audit_brush, "(mask wheel)": audit_mask_wheel, "(masks data)": audit_masks_data, "(moves)": audit_moves, "(scroll)": audit_scroll, "(resume)": audit_resume, "(strip)": audit_strip, "(local)": audit_local, "(fourth)": audit_fourth, "(mono)": audit_mono, "(detail)": audit_detail, "(lens)": audit_lens, "(fringes)": audit_fringes, "(mark)": audit_mark, "(grain)": audit_grain, "(look)": audit_look, "(presets)": audit_presets, "(lut)": audit_lut, "(table)": audit_table, "(menu)": audit_menu, "(color tools)": audit_color_tools,
           "(test chart)": audit_test_chart, "(library)": audit_library, "(export)": audit_export,
           "(frame)": audit_frame, "(crop)": audit_crop, "(slider)": audit_slider, "(tools)": audit_tools,
           "(curve)": audit_curve, "(balance)": audit_balance, "(start)": audit_start, "(tone)": audit_tone, "(scopes)": audit_scopes,
@@ -4918,6 +5063,14 @@ def main() -> int:
     if "--list" in args:
         print("\n".join([*SHOTS, *AUDITS]))
         return 0
+    if "--brush" in args:  # (audit_brush's own process: a GPU, and a window nobody sees)
+        modern = QSurfaceFormat()
+        modern.setVersion(4, 5), modern.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+        QSurfaceFormat.setDefaultFormat(modern)
+        application = QGuiApplication(sys.argv[:1])  # noqa: F841 - must outlive the view
+        faults = brush_on_gpu()
+        print("\n".join(f"FAULT: {fault}" for fault in faults))
+        return len(faults)
     names, audits, title = chosen(args)
     OUT.mkdir(parents=True, exist_ok=True)
     application = QGuiApplication(sys.argv[:1])  # noqa: F841 - must outlive the views
