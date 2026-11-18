@@ -441,6 +441,8 @@ SHOTS = {
         show(root, ""), settle(), counted(root.window(), session),
         call(find(root, "wheel"), "mark", [0.06, 0.09]))),
     "masks": (BIG, photo, masked(OVAL)),
+    "dock": (BIG, photo, lambda root, session: show(root, "eq")),
+    "dock-small": (SMALL, photo, masked(OVAL)),
     "masks-linear": (SMALL, photo, masked(SLOPE)),
     "masks-show": (SMALL, photo, masked({**OVAL, "invert": True}, shown=True)),
     "masks-whole": (SMALL, photo, masked(SLOPE, chosen=0)),
@@ -4594,6 +4596,59 @@ def audit_tools() -> list[str]:
     return faults
 
 
+def audit_dock() -> list[str]:
+    """The card dock beside the right column, with real clicks: a button for each card on show
+    in Adjust, in the column's order; a click on a folded card's button opens it and brings it
+    into the column; on an open one, brings it in and leaves it open; Masks has its own
+    buttons, Crop none."""
+    session = ui.Session([Path("first.arw")], load=chart)
+    view, root = opened(session)
+    faults = Faults()
+    column = box(find(root, "tools-scroll"))
+    dock = find(root, "screen:dock")
+
+    def buttons() -> list[str]:
+        return [i.objectName()[5:] for i in sorted((i for i in items(dock) if i.objectName().startswith("dock:") and i.isVisible()),
+                                                   key=lambda i: box(i).top())]
+
+    def press(card: str) -> None:
+        click(view, next(i for i in items(dock) if i.objectName() == "dock:" + card))
+        view.grabWindow()  # (a frame: the card has its height)
+        wait(lambda: False, 300)  # (brought in a moment later, and glides there)
+        call(root, "land")
+        settle()
+        view.grabWindow()
+
+    def seen(name: str) -> bool:  # its head in the column
+        head = box(find(root, name))
+        return column.contains(QRectF(head.left(), head.top(), head.width(), 30))
+
+    adjust = ["light", "balance", "lut", "saturation", "eq", "chroma", "wheel", "detail", "lens", "grain"]
+    faults.expect(dock.isVisible() and buttons() == adjust, f"Adjust's dock holds {buttons()}")
+    faults.expect(box(dock).right() <= column.left(), "the dock is not beside the column")
+    press("grain")
+    faults.expect(find(root, "panel:grain").property("open") and seen("panel:grain"), "Film grain's button does not open it in sight")
+    press("light")
+    faults.expect(find(root, "panel:tone").property("open") and seen("panel:tone"), "Exposure's button folded it, or left it out of sight")
+    call(root, "go", "masks")
+    settle()
+    view.grabWindow()
+    faults.expect(buttons() == ["masks"], f"Masks with no mask chosen: the dock holds {buttons()}")
+    session.setEdits({"masks": [{"kind": "radial", "at": [0.6, 0.42], "to": [0.8, 0.5], "ratio": 0.6, "feather": 0.4}]})
+    settle()
+    find(root, "wheel").setProperty("mask", 1)
+    settle()
+    view.grabWindow()
+    faults.expect(buttons() == ["masks", "mask", "light", "balance", "saturation", "eq", "chroma", "wheel"], f"Masks with a mask: the dock holds {buttons()}")
+    press("chroma")
+    faults.expect(seen("panel:local-chroma"), "the mask's Chroma curve is not brought in")
+    call(root, "go", "crop")
+    settle()
+    faults.expect(not dock.isVisible(), "the dock is there on Crop")
+    ui.close_view(view)
+    return faults
+
+
 def audit_curve() -> list[str]:
     """The tone curve under a real mouse: a click on the line changes nothing, a drag from it
     makes a point and moves it, a point stops short of its neighbor, a double click removes it."""
@@ -4954,6 +5009,7 @@ def shoot(name: str) -> list[str]:
         stage(root).setProperty("split", -1)  # nor is the unedited half of a split
         stage(root).setProperty("showMask", 0)  # nor a mask shown in its place
         stage(root).setProperty("picking", "")  # and a drag on the photo is to move it
+        find(root, "screen:dock").setProperty("opacity", 0)  # nor the card dock over its right edge
         if session.panels["tool"] == "crop":  # nor the photo dimmed around its frame
             call(root, "go", "edit")
             settle()
@@ -5005,6 +5061,7 @@ def brush_on_gpu() -> list[str]:
     session.commitEdit()
     settle()
     brush, faults = find(root, "brush"), Faults()
+    find(root, "screen:dock").setProperty("opacity", 0)  # (it lies over the photo, where the stroke is read)
     stage = box(find(root, "box:stage")).toRect().adjusted(8, 8, -8, -140)  # (clear of what lies over the photo)
 
     def painted_there() -> np.ndarray:
@@ -5057,7 +5114,7 @@ def audit_brush() -> list[str]:
     return said or ([] if done.returncode == 0 else [f"the brush check ended badly: {done.stderr.strip()[-300:]}"])
 
 
-AUDITS = {"(keys)": audit_stepping, "(column)": audit_column, "(wheel)": audit_wheel,
+AUDITS = {"(keys)": audit_stepping, "(dock)": audit_dock, "(column)": audit_column, "(wheel)": audit_wheel,
           "(wheel data)": audit_wheel_data, "(dots)": audit_dots_place, "(pixels)": audit_pixels, "(colors data)": audit_colors_data, "(pins)": audit_pins,
           "(pin panel)": audit_pin_panel,
           "(masks)": audit_masks, "(brush)": audit_brush, "(mask wheel)": audit_mask_wheel, "(masks data)": audit_masks_data, "(moves)": audit_moves, "(scroll)": audit_scroll, "(resume)": audit_resume, "(strip)": audit_strip, "(local)": audit_local, "(fourth)": audit_fourth, "(mono)": audit_mono, "(detail)": audit_detail, "(lens)": audit_lens, "(fringes)": audit_fringes, "(mark)": audit_mark, "(grain)": audit_grain, "(look)": audit_look, "(presets)": audit_presets, "(lut)": audit_lut, "(table)": audit_table, "(menu)": audit_menu, "(color tools)": audit_color_tools,

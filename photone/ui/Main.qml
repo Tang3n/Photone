@@ -135,13 +135,22 @@ Rectangle {
     // and smoothly; one higher than the column, to its top; never past the column's ends.
     // (A trial of the owner's: "i want to just test this".)
     function bringIn(tool) {
-        const card = ({ tone: tonePanel, balance: balancePanel, saturation: saturationPanel,
-                        eq: eqPanel, chroma: chromaPanel, mono: monoPanel, wheel: wheelBlock, grain: grainPanel, lut: lutPanel, detail: detailPanel, lens: lensPanel })[tool]
+        bringCard(({ tone: tonePanel, balance: balancePanel, saturation: saturationPanel,
+                     eq: eqPanel, chroma: chromaPanel, mono: monoPanel, wheel: wheelBlock, grain: grainPanel, lut: lutPanel, detail: detailPanel, lens: lensPanel })[tool])
+    }
+    function bringCard(card) {
         if (!card || !card.visible) return
         const top = card.mapToItem(develop, 0, 0).y, high = card.height - 24, room = scroller.height
         const to = high > room - 20 ? top - 10 : top + high / 2 - room / 2
         bringing.to = Math.max(0, Math.min(Math.max(0, scroller.contentHeight - room), to))
         bringing.restart()
+    }
+    // A card's button on the dock beside the column: a folded card opens as a click on its
+    // head opens it (lit up and brought in); one that is open, or does not fold, is brought
+    // in and lit up.
+    function reveal(card) {
+        if (card.folds && !card.open) return card.fold()
+        bringCard(card); card.flash()
     }
     // (A moment later: the column has its new height only once the card is laid out.)
     Timer { id: laidOut; property string tool; interval: 30; onTriggered: root.bringIn(tool) }
@@ -323,6 +332,32 @@ Rectangle {
     // is said by the last rows fading out at the box's foot, until the list is at its end.
     // (`above`: the same at the box's head, for what lies over the first row in sight; the
     // checkpoints' list stands at its end, the newest, so what it hides is above.)
+    // Glass over the photo, under whatever floats there (the zoom's bar, the card dock): the
+    // photo behind it blurred and darkened, and an outline (the owner: "a blur glass
+    // transparent background and an outline", "make sure the text is readable"). It fills
+    // its parent, which must be a sibling of the stage.
+    component Glass: Item {
+        id: glass
+        property real radius: 8
+        anchors.fill: parent
+        ShaderEffectSource {
+            id: behind
+            visible: false
+            sourceItem: stage
+            sourceRect: Qt.rect(glass.parent.x - stage.x, glass.parent.y - stage.y, glass.width, glass.height)
+        }
+        Rectangle { id: shape; anchors.fill: parent; radius: glass.radius; visible: false; layer.enabled: true }
+        MultiEffect {
+            anchors.fill: parent
+            source: behind
+            blurEnabled: true; blur: 1.0; blurMax: 48; autoPaddingEnabled: false
+            maskEnabled: true; maskSource: shape
+        }
+        Rectangle {
+            anchors.fill: parent; radius: glass.radius
+            color: Qt.rgba(0.05, 0.05, 0.06, 0.58); border { width: 1; color: Qt.rgba(1, 1, 1, 0.28) }
+        }
+    }
     component MoreBelow: Rectangle {
         property Flickable of
         property bool above: false
@@ -1835,6 +1870,12 @@ Rectangle {
                 visible: session.source !== "" && !root.mono && (root.mode === "edit" || (root.mode === "masks" && wheel.mask > 0))
                 readonly property real lead: 30   // its title
                 readonly property bool open: root.unfolded.wheel === true
+                // (As a Panel is, for the dock beside the column: Main.reveal.)
+                readonly property string card: "wheel"
+                readonly property string title: "Tone Wheel"
+                readonly property bool folds: true
+                function fold() { root.fold("wheel") }
+                function flash() { wheelGround.flash() }
                 readonly property real head: lead + 16
                 readonly property real side: Math.min(parent.width, 400)
                 readonly property real tabs: 34   // the tone tabs' height (taller than they were: the owner's wish)
@@ -2385,31 +2426,13 @@ Rectangle {
         PushButton { label: "Open…"; anchors.horizontalCenter: parent.horizontalCenter; onPressed: opener.open() }
     }
     // Fit, 100 %, and what the zoom is now.
-    Rectangle {
+    Item {
         objectName: "screen:zoom"
         visible: stage.ready && root.editing
         anchors { horizontalCenter: stage.horizontalCenter; bottom: stage.bottom; bottomMargin: 12 }
         id: zoomBox
-        width: zoomRow.width + 6; height: 30; radius: 8; color: "transparent"
-        // Glass: the photo behind it blurred and darkened, and an outline (the owner: "a blur
-        // glass transparent background and an outline", "make sure the text is readable").
-        ShaderEffectSource {
-            id: behindZoom
-            visible: false
-            sourceItem: stage
-            sourceRect: Qt.rect(zoomBox.x - stage.x, zoomBox.y - stage.y, zoomBox.width, zoomBox.height)
-        }
-        Rectangle { id: zoomShape; anchors.fill: parent; radius: zoomBox.radius; visible: false; layer.enabled: true }
-        MultiEffect {
-            anchors.fill: parent
-            source: behindZoom
-            blurEnabled: true; blur: 1.0; blurMax: 48; autoPaddingEnabled: false
-            maskEnabled: true; maskSource: zoomShape
-        }
-        Rectangle {
-            anchors.fill: parent; radius: zoomBox.radius
-            color: Qt.rgba(0.05, 0.05, 0.06, 0.58); border { width: 1; color: Qt.rgba(1, 1, 1, 0.28) }
-        }
+        width: zoomRow.width + 6; height: 30
+        Glass {}
         Row {
             id: zoomRow
             anchors.centerIn: parent
@@ -2426,6 +2449,44 @@ Rectangle {
                     horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
                     color: Qt.rgba(1, 1, 1, 0.82); font.pixelSize: 12; font.features: { "tnum": 1 }
                     text: Math.round(stage.shown * 100) + " %"
+                }
+            }
+        }
+    }
+    // The cards of the tab on show (Adjust or Masks), as buttons in their own icons and
+    // colors on the zoom bar's glass, against the right column's edge over the photo; a click
+    // opens that card as a click on its head does (Main.reveal). The owner's wish. Read from
+    // the column itself: every card on show there that has a `card` name has a button.
+    Item {
+        id: dock
+        objectName: "screen:dock"
+        readonly property var cards: root.mode === "edit" || root.mode === "masks"
+            ? Array.prototype.filter.call(develop.children, c => c.visible && !!c.card) : []
+        visible: stage.ready && root.editing && cards.length > 0
+        // (Its top level with the column's first card, below the tabs.)
+        anchors { right: tools.left; rightMargin: 10 }
+        y: Math.max(stage.y + 10, tools.y + scrollArea.y + 8)
+        width: dockColumn.width + 8; height: dockColumn.height + 8
+        Glass {}
+        Column {
+            id: dockColumn
+            anchors.centerIn: parent
+            Repeater {
+                model: dock.cards
+                Rectangle {
+                    required property var modelData
+                    objectName: "dock:" + modelData.card
+                    width: 34; height: 34; radius: 6
+                    color: press.containsMouse ? Qt.rgba(1, 1, 1, 0.14) : "transparent"
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.Button; Accessible.name: modelData.title
+                    Keys.onSpacePressed: root.reveal(modelData)
+                    border { width: activeFocus ? 1 : 0; color: Theme.text }
+                    Icon {
+                        anchors.centerIn: parent; width: Theme.cardSign; height: Theme.cardSign; stroke: 1.8
+                        path: Theme.cardIcon(parent.modelData.card); color: Theme.cardInk(parent.modelData.card, Theme.text)
+                    }
+                    MouseArea { id: press; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.reveal(parent.modelData) }
                 }
             }
         }

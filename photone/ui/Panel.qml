@@ -31,6 +31,7 @@ Column {
     property bool made: false
     Component.onCompleted: made = true
     onOpenChanged: if (made && open && folds) under.flash()
+    function flash() { under.flash() }
     width: parent.width
     Item {
         width: parent.width; height: 30
