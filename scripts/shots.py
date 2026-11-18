@@ -921,6 +921,7 @@ def audit_wheel_data() -> list[str]:
     dot is drawn where its a and b say, in its own color."""
     session = ui.Session([Path("first.arw")], load=chart)
     view, root = opened(session, "")
+    session.setPanel("live", False)  # (Before: what this audit starts from; After is where a new session starts)
     faults = Faults()
     faults.expect(counted(view, session), "the photo's colors are never counted")
     area = box(root.findChild(QObject, "photo"))

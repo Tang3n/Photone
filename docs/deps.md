@@ -20,7 +20,6 @@ library or relies on a new service adds a row here in the same change.
 |---|---|---|---|
 | Vulkan with an HDR surface (`VK_EXT_swapchain_colorspace`) on a Wayland desktop with HDR turned on for the display | the GPU driver (`nvidia-driver-*`, `mesa-vulkan-drivers`); Plasma 6 or a recent GNOME | The HDR side of the SDR/HDR switch | The switch says HDR is not available and Photone stays in SDR |
 | `kscreen-doctor` | `libkscreen-bin` (part of Plasma) | Reading the display's HDR headroom, for the brightest the photo may get | A headroom of 2× white is assumed |
-| The Inter typeface | `fonts-inter` | The interface's text | The system's default sans-serif is used |
 
 ## Development only (not shipped)
 

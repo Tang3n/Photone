@@ -1511,12 +1511,12 @@ def check_session_tools() -> None:
     session.pickNeutral(0.01, 0.99)  # the wedge's black step
     assert session.history.edit == {} and "too bright or too dark" in session.error
 
-    assert session.panels == {"tool": "tone", "histogram": False, "clipping": False, "live": False, "chart": False, "place": "library"}
+    assert session.panels == {"tool": "tone", "histogram": False, "clipping": False, "live": True, "chart": False, "place": "library"}
     session.setPanel("tool", "curve")
     session.setPanel("histogram", True)
     session.setPanel("histogram", "yes")
     session.setPanel("nonsense", True)
-    assert session.panels == {"tool": "curve", "histogram": True, "clipping": False, "live": False, "chart": False, "place": "library"}
+    assert session.panels == {"tool": "curve", "histogram": True, "clipping": False, "live": True, "chart": False, "place": "library"}
 
     # The test chart in the photo's place: the chart's picture and size, the photo's edit.
     session.setEdit("exposure", 0.5)

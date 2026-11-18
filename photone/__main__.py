@@ -37,7 +37,7 @@ def open_catalog():
 def begin(ui):
     """Qt's application, named, with its surface chosen."""
     from PySide6.QtCore import QLoggingCategory
-    from PySide6.QtGui import QGuiApplication, QIcon
+    from PySide6.QtGui import QFontDatabase, QGuiApplication, QIcon
 
     # Qt tells the desktop's portal the program's name, and the portal refuses: it has no
     # `photone.desktop` to go by (that comes with the install script), and started from a
@@ -49,6 +49,13 @@ def begin(ui):
     application.setApplicationName("Photone")
     application.setDesktopFileName("photone")
     application.setWindowIcon(QIcon(str(ui.UI / "icon.svg")))
+    # Its own typeface, the same on every system (ui/fonts, with its license): for text that
+    # names a family (Theme.font) and, at the desktop's size, for text that names none.
+    for file in sorted((ui.UI / "fonts").glob("*.ttf")):
+        QFontDatabase.addApplicationFont(str(file))
+    font = application.font()
+    font.setFamily("Noto Sans")
+    application.setFont(font)
     return application
 
 

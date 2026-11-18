@@ -85,7 +85,7 @@ QtObject {
     readonly property int slider: 44     // a slider: its name and value, the track below
     readonly property int fontSize: 13
     readonly property int smallSize: 11
-    readonly property string font: "Inter"
+    readonly property string font: "Noto Sans"   // (ui/fonts: it comes with the program)
 
     function decode(v) { return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4) }
     function fix(c) {

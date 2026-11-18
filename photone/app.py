@@ -209,7 +209,7 @@ class Session(QObject):
         self._range = ("full", 0.0, 1.0)
         self._panels = {"tool": self._kept("view/tool", "tone", str),
                         "histogram": self._kept("view/histogram", False, bool), "clipping": False,
-                        "live": self._kept("view/live", False, bool), "chart": False,
+                        "live": self._kept("view/live", True, bool), "chart": False,
                         # (Where the window was when it was last closed: the library, or Edit.)
                         "place": self._kept("view/place", "library", str)}
         # The painted masks' picture: how often it changed and of which strokes, and what
