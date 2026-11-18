@@ -14,6 +14,7 @@ library or relies on a new service adds a row here in the same change.
 | What Qt's X11 plugin loads | `libxcb-cursor0`, `libxkbcommon-x11-0` | The window on X11 | On X11: "could not load the Qt platform plugin xcb" |
 | OpenGL 3.3 / OpenGL ES 3.0 or Vulkan | the GPU vendor's driver (`nvidia-driver-*`, Mesa) | The picture pipeline (a shader) | Qt falls back to software drawing, which has no shaders: the photo is not shown |
 
+On Windows `install.bat` does everything (it fetches uv for the build and removes it again).
 The Windows build (`./build-windows.sh` or `build-windows.bat`, the folder `bin/`) brings everything with it and needs
 Windows 10 version 1903 or later (Qt loads the system's `icuuc.dll`) and a GPU with Direct3D 11.
 

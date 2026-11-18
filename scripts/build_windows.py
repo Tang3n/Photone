@@ -51,7 +51,8 @@ KEPT = {"QtCore", "QtDBus", "QtGui", "QtNetwork", "QtOpenGL", "QtQml", "QtQuick"
 def fetch(packages: list[str], to: Path) -> None:
     """Their Windows wheels, unpacked into `to`."""
     if uv := shutil.which("uv"):
-        tool = [uv, "pip", "install", "--python-platform", "x86_64-pc-windows-msvc"]
+        tool = [uv, "pip", "install", "--python", sys.executable,  # (uv wants one to go by)
+                "--python-platform", "x86_64-pc-windows-msvc"]
     else:
         tool = [sys.executable, "-m", "pip", "install", "--platform", "win_amd64",
                 "--implementation", "cp", "--disable-pip-version-check"]

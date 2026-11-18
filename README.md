@@ -67,10 +67,22 @@ To have it in the desktop's menu and in "Open with", as the `photone` command:
 
 ### Windows
 
-`build-windows.bat` (on Windows) or `./build-windows.sh` (on Linux) makes a folder `bin/` that
-runs on Windows 10 or 11 as it is, with nothing to install: start `Photone.exe` in it. Building
-needs only Python 3.11 or later (uv is used where there is one, pip otherwise). This build is new
-and little tested; HDR is Linux only for now.
+Open **Command Prompt**, paste this line and press Enter:
+
+```bat
+curl -L -o "%TEMP%\photone-install.bat" https://raw.githubusercontent.com/TominoCZ/Photone/main/install.bat && "%TEMP%\photone-install.bat"
+```
+
+It downloads Photone, builds it, installs it to `C:\Program Files\Photone` with shortcuts on the
+Desktop and in the Start menu, and cleans up after itself. Nothing needs to be installed first
+(Windows 10 or 11, 64-bit; Windows asks once for permission). To remove it again, use
+"Installed apps" in Windows' settings.
+
+The Windows version is new and little tested; HDR is Linux only for now.
+
+To only build the folder without installing: `build-windows.bat` (on Windows) or
+`./build-windows.sh` (on Linux) makes `bin/`, which runs as it is: start `Photone.exe` in it.
+Building needs only Python 3.11 or later.
 
 ## Handy keys
 
