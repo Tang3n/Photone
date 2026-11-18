@@ -94,28 +94,21 @@ Item {
             property real startX
             property real startFraction
             // A drag that begins on the thumb moves the value from where it is, by how far the
-            // pointer goes (Shift: a tenth of that). One that begins elsewhere on the track
-            // first brings the thumb to where it began (the owner: "jump to the position i
-            // started dragging from if i dont drag the slider head itself"): once the pointer
-            // moves, not at the press, so that a press alone changes nothing and a double
-            // click finds the setting as it was.
-            property bool onThumb
-            property bool jumped
+            // pointer goes (Shift: a tenth of that). A press elsewhere on the track brings the
+            // thumb there at once, as the first move of the drag (the owner: "register
+            // mouseDown as a first movement of the slider"), and the drag goes on from there.
             // (Shift pressed or let go in the middle of a drag: the drag goes on from where the
             // value is, at the other pace. Measured from the press it jumped; the owner saw it.)
             property real pace: 1
             onPressed: (mouse) => {
-                startX = mouse.x; startFraction = root.fraction; jumped = false
-                pace = mouse.modifiers & Qt.ShiftModifier ? 0.1 : 1
-                onThumb = Math.abs(mouse.x - (root.fraction * track.travel + track.thumb / 2)) <= track.thumb / 2 + 3
+                const center = root.fraction * track.travel + track.thumb / 2
+                const onThumb = Math.abs(mouse.x - center) <= track.thumb / 2 + 3
+                startX = mouse.x; pace = mouse.modifiers & Qt.ShiftModifier ? 0.1 : 1
+                startFraction = onThumb ? root.fraction : (mouse.x - track.thumb / 2) / track.travel
+                if (!onThumb) root.ask(root.valueAt(startFraction))
             }
             onPositionChanged: (mouse) => {
                 if (!pressed) return
-                if (!onThumb && !jumped && Math.abs(mouse.x - startX) > 2) {
-                    startFraction = (startX - track.thumb / 2) / track.travel
-                    jumped = true
-                }
-                if (!onThumb && !jumped) return
                 const fine = mouse.modifiers & Qt.ShiftModifier ? 0.1 : 1
                 if (fine !== pace) { pace = fine; startX = mouse.x; startFraction = root.fraction }
                 root.ask(root.valueAt(startFraction + (mouse.x - startX) / track.travel * fine))
