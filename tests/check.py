@@ -1879,7 +1879,13 @@ def check_local() -> None:
     own = edit.valid_masks([{**mask, "edit": {"curve": bent, "eq": [{"hue": 120, "gain": 150, "width": 40}]}}])[0]["edit"]
     assert own["curve"] == bent and own["eq"][0]["gain"] == 150.0, own
     both = edit.merged({"curve": [[0.0, 0.1], [1.0, 1.0]], "chroma": bent}, own, camera)
-    assert both["curve"] == bent and both["chroma"] == bent and both["eq"] == own["eq"], both
+    assert both["curve"] == [[0.0, 0.1], [1.0, 1.0]] and both["chroma"] == bent and "eq" not in both, "the whole image's stay"
+    assert both["over"] == {"curve": bent, "eq": own["eq"]}, "and the mask's own come on top"
+    over, none = edit.uniforms(both, None, True), edit.uniforms({}, None, True)
+    assert over["curve2On"] == 1 and over["curve2Y"][:3] == [0.0, 0.7, 1.0] and over["chroma2On"] == 0 and over["eq2Count"] == 1 and over["eq2A0"][:3] == [120.0, 0.5, 40.0]
+    assert over["curveY"][:2] == [0.1, 1.0] and over["chromaOn"] == 1 and over["eqCount"] == 0 and over["look"] == 1
+    assert edit.uniforms({"over": {"eq": own["eq"]}}, None, True)["look"] == 1, "a mask's EQ alone is a look too"
+    assert none["curve2On"] == none["chroma2On"] == none["eq2Count"] == 0 and len(none["curve2X"]) == len(none["eq2A1"]) == 16
     photo = {"masks": [kept, edit.valid_masks([mask])[0]], "contrast": 5.0}
     found = edit.layers(photo, camera)
     assert [n for n, _ in found] == [1] and found[0][1]["contrast"] == 5.0 and found[0][1]["saturation"] == 200.0, found

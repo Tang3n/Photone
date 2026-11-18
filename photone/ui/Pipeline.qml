@@ -67,6 +67,17 @@ ShaderEffect {
     property matrix4x4 masksA1: edit.masksA1
     property matrix4x4 masksB0: edit.masksB0
     property matrix4x4 masksB1: edit.masksB1
+    property real curve2On: edit.curve2On
+    property real chroma2On: edit.chroma2On
+    property real eq2Count: edit.eq2Count
+    property matrix4x4 curve2X: edit.curve2X
+    property matrix4x4 curve2Y: edit.curve2Y
+    property matrix4x4 curve2M: edit.curve2M
+    property matrix4x4 chroma2X: edit.chroma2X
+    property matrix4x4 chroma2Y: edit.chroma2Y
+    property matrix4x4 chroma2M: edit.chroma2M
+    property matrix4x4 eq2A0: edit.eq2A0
+    property matrix4x4 eq2A1: edit.eq2A1
     fragmentShader: pipelineShader
     vertexShader: pipelineVertex
 }

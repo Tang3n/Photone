@@ -798,8 +798,8 @@ class Session(QObject):
 
     @Slot(int, str, "QVariantList")
     def setMaskWhole(self, number: int, key: str, value: list) -> None:  # noqa: N802
-        """A mask's own tone curve, chroma curve or color EQ (edit.LOCAL_WHOLE): from then on
-        it holds inside the mask in place of the whole image's."""
+        """A mask's own tone curve, chroma curve or color EQ (edit.LOCAL_WHOLE): it works
+        inside the mask on top of the whole image's."""
         masks = [dict(mask) for mask in self.history.edit.get("masks", [])]
         if 1 <= number <= len(masks) and key in edit.LOCAL_WHOLE:
             masks[number - 1]["edit"] = {**masks[number - 1].get("edit", {}), key: value}
@@ -807,10 +807,11 @@ class Session(QObject):
 
     @Slot(int, str, result="QVariantList")
     def localWhole(self, number: int, key: str) -> list:  # noqa: N802
-        """What holds inside mask `number` for that setting: its own, else the whole image's."""
+        """Mask `number`'s own of that setting, which comes on top of the whole image's; a
+        new mask's is the setting at rest."""
         masks = self.history.edit.get("masks", [])
         own = masks[number - 1].get("edit", {}) if 1 <= number <= len(masks) else {}
-        return own.get(key, self.history.edit.get(key, edit.DEFAULTS[key]))
+        return own.get(key, edit.DEFAULTS[key])
 
     @Slot(int, str, result="QVariantList")
     def localLine(self, number: int, key: str) -> list:  # noqa: N802

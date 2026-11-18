@@ -73,6 +73,17 @@ layout(std140, binding = 0) uniform buf {
     float onlyMask;   // 1, 2, …: this is the picture inside that mask, drawn by the mask's weight
     float hdrFit;     // what is shown is multiplied by this after the HDR climb (1; less: a trial for exports)
     float stripes;    // how far the stripes of the clipping paint have run, in stripes (it moves)
+    float curve2On;   // A mask's own tone curve, chroma curve and color EQ (edit.over_uniforms):
+    float chroma2On;  // a second pass on top of the whole image's, each straight after it.
+    float eq2Count;   // Nothing of it outside a mask's picture (onlyMask).
+    mat4 curve2X;
+    mat4 curve2Y;
+    mat4 curve2M;
+    mat4 chroma2X;
+    mat4 chroma2Y;
+    mat4 chroma2M;
+    mat4 eq2A0;
+    mat4 eq2A1;
 };
 layout(binding = 1) uniform sampler2D source;  // the first picture, with mipmaps
 // The full-size picture. Bound from the moment it arrives, used or not, so that the GPU
@@ -111,18 +122,25 @@ float curveAt(mat4 X, mat4 Y, mat4 M, float x) {
 
 // The tone curve: lightness in, lightness out. Above white, which only HDR has, it carries
 // on at the pace of the picture.
-float toneCurve(float lightness) {
+float toneCurve(mat4 X, mat4 Y, mat4 M, float lightness) {
     float x = clamp(lightness, 0.0, 1.0);
-    return curveAt(curveX, curveY, curveM, x) + lightness - x;
+    return curveAt(X, Y, M, x) + lightness - x;
+}
+
+// The chroma curve: chroma in, chroma out, 0.4 being the curve's right end; beyond it, on at
+// the pace of the picture.
+float chromaCurve(mat4 X, mat4 Y, mat4 M, float chroma) {
+    float x = chroma / 0.4;
+    return (curveAt(X, Y, M, min(x, 1.0)) + max(x - 1.0, 0.0)) * 0.4;
 }
 
 // What the color EQ makes of the chroma of a color of that hue (degrees): times this
 // (edit.eq_at).
-float eqGain(float hue) {
+float eqGain(mat4 A0, mat4 A1, float count, float hue) {
     float gain = 1.0;
     for (int i = 0; i < 8; i++) {
-        if (float(i) >= eqCount) break;
-        vec4 point = i < 4 ? eqA0[i] : eqA1[i - 4];
+        if (float(i) >= count) break;
+        vec4 point = i < 4 ? A0[i] : A1[i - 4];
         float apart = abs(mod(hue - point.x + 180.0, 360.0) - 180.0);
         gain += (1.0 - smoothstep(point.z * 0.5, point.z, apart)) * point.y;
     }
@@ -267,14 +285,16 @@ void main() {
         fragColor = vec4(vec3(linearOut > 0.5 ? pow(shown, 2.2) : shown), 1.0) * qt_Opacity;
         return;
     }
-    if (curveOn > 0.5 || (scope > 0.5 && scope < 5.5) || look > 0.5 || scope > 7.5) {
+    if (curveOn > 0.5 || curve2On > 0.5 || (scope > 0.5 && scope < 5.5) || look > 0.5 || scope > 7.5) {
         vec3 roots = rootsOf(c);
         float lightness = dot(LIGHTNESS, roots);
         if (scope > 0.5 && scope < 1.5) {
             fragColor = vec4(vec3(clamp(lightness, 0.0, 1.0)), 1.0);
             return;
         }
-        roots += toneCurve(lightness) - lightness;
+        float lit = curveOn > 0.5 ? toneCurve(curveX, curveY, curveM, lightness) : lightness;
+        if (curve2On > 0.5) lit = toneCurve(curve2X, curve2Y, curve2M, lit);  // a mask's own, on top
+        roots += lit - lightness;
         if (look > 0.5 || scope > 1.5) {
             // Look: on the color as OKLab has it. The pins, then saturation (not where a pin
             // protects), the chroma curve, the color EQ: edit.colors_at is the same arithmetic.
@@ -300,11 +320,11 @@ void main() {
                     float skin = 1.0 - 0.7 * (1.0 - smoothstep(15.0, 35.0, abs(mod(hue - 55.0 + 180.0, 360.0) - 180.0)));
                     after *= 1.0 + vibrance * (1.0 - shield) * skin * (1.0 - smoothstep(0.0, 0.25, after));
                 }
-                if (chromaOn > 0.5) {
-                    float x = after / 0.4;
-                    after = (curveAt(chromaX, chromaY, chromaM, min(x, 1.0)) + max(x - 1.0, 0.0)) * 0.4;
-                }
-                if (eqCount > 0.5) after *= eqGain(hue);
+                if (chromaOn > 0.5) after = chromaCurve(chromaX, chromaY, chromaM, after);
+                if (eqCount > 0.5) after *= eqGain(eqA0, eqA1, eqCount, hue);
+                // A mask's own chroma curve and EQ, on top of the whole image's.
+                if (chroma2On > 0.5) after = chromaCurve(chroma2X, chroma2Y, chroma2M, after);
+                if (eq2Count > 0.5) after *= eqGain(eq2A0, eq2A1, eq2Count, hue);
                 lab.yz *= after / chroma;
             }
             if (scope > 3.5 && scope < 5.5) { fragColor = packed(lab, scope > 4.5); return; }

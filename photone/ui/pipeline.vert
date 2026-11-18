@@ -66,6 +66,17 @@ layout(std140, binding = 0) uniform buf {  // must match pipeline.frag exactly
     float onlyMask;   // 1, 2, …: this is the picture inside that mask, drawn by the mask's weight
     float hdrFit;     // what is shown is multiplied by this after the HDR climb (1; less: a trial for exports)
     float stripes;    // how far the stripes of the clipping paint have run, in stripes (it moves)
+    float curve2On;   // A mask's own tone curve, chroma curve and color EQ (edit.over_uniforms):
+    float chroma2On;  // a second pass on top of the whole image's, each straight after it.
+    float eq2Count;   // Nothing of it outside a mask's picture (onlyMask).
+    mat4 curve2X;
+    mat4 curve2Y;
+    mat4 curve2M;
+    mat4 chroma2X;
+    mat4 chroma2Y;
+    mat4 chroma2M;
+    mat4 eq2A0;
+    mat4 eq2A1;
 };
 void main() {
     // Which part of the stored picture this corner of the item shows: the photo's frame

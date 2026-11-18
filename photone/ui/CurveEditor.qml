@@ -13,8 +13,8 @@ Item {
     property var bars: []                      // what lies behind it, heights 0..255
     property string low: "shadows"             // what the left end is called,
     property string high: "highlights"         // and the right
-    // For a mask (`mask`: its number): its own curve, or until it has one the whole image's,
-    // which the first change then becomes the mask's own from (session.setMaskWhole).
+    // For a mask (`mask`: its number): its own curve, on top of the whole image's; straight
+    // until it is changed (session.setMaskWhole).
     property bool local: false   // a mask's card: named apart from the whole image's editor
     property int mask: 0
     readonly property var points: mask > 0 ? (session.masks, session.localWhole(mask, key)) : session[key]

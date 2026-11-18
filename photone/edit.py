@@ -65,9 +65,13 @@ MASK_RANGES = {"ratio": (0.1, 10.0), "feather": (0.0, 1.0)}
 LOCAL = {"exposure": 5.0, "contrast": 100.0, "brightness": 100.0, "highlights": 100.0,
          "midtones": 100.0, "shadows": 100.0, "whites": 100.0, "blacks": 100.0,
          "temperature": 4000.0, "tint": 150.0, "saturation": 100.0, "vibrance": 100.0}
-# And these of a mask's edit are whole things of its own, in place of the whole image's inside
-# the mask (two curves cannot be added like two numbers): the tone curve, the chroma curve, the
-# color EQ. Until a mask has one, the whole image's holds inside it too.
+# And these of a mask's edit are whole things of its own, a second pass on top of the whole
+# image's inside the mask (two curves cannot be added like two numbers, so one follows the
+# other): the tone curve, the chroma curve, the color EQ. A new mask has none: the straight
+# line, no points. (Until 2026-11-18 a mask's took the whole image's place and showed the
+# whole image's until it had one; the owner: "some cards have their settings cloned from
+# Adjust to a newly created mask, thats not good", "filter cards are supposed to be complete
+# separate passes stacked on top".)
 LOCAL_WHOLE = ("curve", "chroma", "eq")
 # "brush": painted by hand, as `strokes`, each a run of places in the stored picture (0..1 both
 # ways) painted (or, `erase`, rubbed out) with a round brush: `size` its radius as a share of
@@ -396,14 +400,15 @@ def _local(given) -> dict:
 
 def merged(edit: dict, local: dict, camera: dict | None) -> dict:
     """The edit of the picture inside a mask: the whole image's with the mask's amounts
-    added, each kept within what the setting can be. Where the whole image's says nothing
+    added, each kept within what the setting can be, and as `over` the mask's own curves and
+    EQ, which come on top. Where the whole image's says nothing
     (the exposure a photo starts with, the white balance as shot), that is what is added to."""
     full, out = {**DEFAULTS, **edit}, dict(edit)
     shot = (camera.get("shot") or as_shot(camera)) if camera else (6500.0, 0.0)
     rest = {"exposure": exposure_of(full, camera), "temperature": shot[0], "tint": shot[1]}
     for key, amount in local.items():
-        if key in LOCAL_WHOLE:
-            out[key] = amount
+        if key in LOCAL_WHOLE:  # on top of the whole image's, which stays (over_uniforms)
+            out["over"] = {**out.get("over", {}), key: amount}
             continue
         low, high = RANGES[key]
         base = rest[key] if full[key] is None else full[key]
@@ -900,6 +905,31 @@ def look_uniforms(full: dict) -> dict:
             "eqCount": float(len(full["eq"])), "eqA0": bands[:16], "eqA1": bands[16:]}
 
 
+def over_uniforms(over: dict) -> dict:
+    """A mask's own tone curve, chroma curve and color EQ for the shader, which applies each
+    straight after the whole image's (`merged` gathers them as `over`); for the whole image
+    itself, none. (Kept by what they are: they are asked for at every draw, and change only
+    while one of them is being drawn.)"""
+    key = repr(over)
+    if key not in _OVER:
+        if len(_OVER) > 32:
+            _OVER.clear()
+        _OVER[key] = _over_uniforms(over)
+    return _OVER[key]
+
+
+_OVER: dict[str, dict] = {}
+
+
+def _over_uniforms(over: dict) -> dict:
+    tone = curve_uniforms(over.get("curve", STRAIGHT))
+    look = look_uniforms({**DEFAULTS, "chroma": over.get("chroma", STRAIGHT),
+                          "eq": over.get("eq", [])})
+    second = {**tone, **{k: look[k] for k in look if k.startswith(("chroma", "eq"))}}
+    return {name.replace("curve", "curve2").replace("chroma", "chroma2").replace("eq", "eq2"): v
+            for name, v in second.items()}
+
+
 def masks_uniforms(masks: list[dict], shape: float) -> dict:
     """The masks for the shader, in four matrices of four masks each, worked out as far as
     can be: with (u, v) a place in the stored picture, a mask's A is (x, y, z, kind) and its B
@@ -971,24 +1001,27 @@ def uniforms(edit: dict, camera: dict | None, raw: bool, white: float = 1.0,
     full = {**DEFAULTS, **edit}
     to_cam, from_cam, wb = balance(full, camera)
     c, s, k = curve(full["profile"]) if raw else (0.0, 1.0, 1.0)  # 0: no curve
-    return {"gain": 2.0 ** exposure_of(full, camera), "wbGain": wb,
-            "toCam": to_cam.tolist(), "fromCam": from_cam.tolist(),
-            "mid": MID if raw else MID_FINISHED,
-            # Contrast: stops from mid gray are stretched by this much (+100 doubles them).
-            "contrast": 2.0 ** (full["contrast"] / 100) - 1,
-            # Brightness: a power on the finished picture's luminance, less one (+100: 0.5).
-            "brightness": 2.0 ** (-full["brightness"] / 100) - 1,
-            "highlights": full["highlights"] / 100, "shadows": full["shadows"] / 100 * 1.5,
-            "midtones": full["midtones"] / 100,  # a stop at mid gray
-            # Whites: up to 0.6 stops at white. Blacks: light taken away at black (+100 adds
-            # it: sign turned), by the square of the slider, since a display's steps near
-            # black are that much finer: 0.03 of white is level 48 of 255.
-            "whites": full["whites"] / 100 * 0.6,
-            "blacks": -math.copysign(0.03 * (full["blacks"] / 100) ** 2, full["blacks"]),
-            "curveC": c, "curveS": s, "curveK": k,
-            "hdrLift": max(0.0, white - 1) if raw else 0.0,
-            **curve_uniforms(full["curve"]), **pins_uniforms(full["pins"]), **look_uniforms(full),
-            **masks_uniforms(full["masks"], shape)}
+    out = {"gain": 2.0 ** exposure_of(full, camera), "wbGain": wb,
+           "toCam": to_cam.tolist(), "fromCam": from_cam.tolist(),
+           "mid": MID if raw else MID_FINISHED,
+           # Contrast: stops from mid gray are stretched by this much (+100 doubles them).
+           "contrast": 2.0 ** (full["contrast"] / 100) - 1,
+           # Brightness: a power on the finished picture's luminance, less one (+100: 0.5).
+           "brightness": 2.0 ** (-full["brightness"] / 100) - 1,
+           "highlights": full["highlights"] / 100, "shadows": full["shadows"] / 100 * 1.5,
+           "midtones": full["midtones"] / 100,  # a stop at mid gray
+           # Whites: up to 0.6 stops at white. Blacks: light taken away at black (+100 adds
+           # it: sign turned), by the square of the slider, since a display's steps near
+           # black are that much finer: 0.03 of white is level 48 of 255.
+           "whites": full["whites"] / 100 * 0.6,
+           "blacks": -math.copysign(0.03 * (full["blacks"] / 100) ** 2, full["blacks"]),
+           "curveC": c, "curveS": s, "curveK": k,
+           "hdrLift": max(0.0, white - 1) if raw else 0.0,
+           **curve_uniforms(full["curve"]), **pins_uniforms(full["pins"]), **look_uniforms(full),
+           **masks_uniforms(full["masks"], shape), **over_uniforms(edit.get("over", {}))}
+    if out["chroma2On"] or out["eq2Count"]:
+        out["look"] = 1.0  # (a mask's own chroma curve or EQ is something done to colors too)
+    return out
 
 
 # ---- the frame -------------------------------------------------------------------------------
