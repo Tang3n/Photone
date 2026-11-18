@@ -1744,6 +1744,23 @@ def check_session_tools() -> None:
     session.undo()
     session.undo()
     assert session.history.edit["contrast"] == 30.0, "each reset is one step"
+    # A/B on a mask's card, and on the Tone Wheel: without those settings of that mask, or its pins.
+    whole = dict(session.history.edit)
+    session.setEdits({"masks": [{"kind": "radial", "at": [0.5, 0.5], "to": [0.7, 0.5], "edit": {"exposure": 1.0, "contrast": 20.0}}],
+                      "pins": [{"from": [0.1, 0.0], "to": [0.1, 0.06]}, {"from": [0.0, 0.1], "to": [0.0, 0.05], "mask": 1}]})
+    assert len(session.maskLayers) == 1 and session.uniforms["look"] == 1
+    session.setMaskBypass(1, ["exposure"])
+    assert session._compared()["masks"][0]["edit"] == {"contrast": 20.0} and len(session.maskLayers) == 1
+    session.setMaskBypass(1, ["exposure", "contrast"])
+    assert session.maskLayers == [] and len(session.history.edit["masks"][0]["edit"]) == 2, "held, and the edit is as it was"
+    session.setMaskBypass(0, ["pins"])
+    assert [pin.get("mask", 0) for pin in session._compared()["pins"]] == [1], "the whole image's pins, not the mask's"
+    session.setMaskBypass(1, ["pins"])
+    assert [pin.get("mask", 0) for pin in session._compared()["pins"]] == [0] and len(session.maskLayers) == 1
+    session.setMaskBypass(0, [])
+    assert session._compared() == session.history.edit
+    session.history.replace(whole)
+    session.refresh()
     assert len(session.curveLine) == edit.LINE and abs(session.curveLine[128] - 0.6) < 1e-9
     wild = [[0.0, 0.0], [0.2, 0.9], [0.25, 0.1], [0.6, 0.7], [1.0, 1.0]]
     assert max(abs(a - edit.curve_at(wild, i / 256)) for i, a in enumerate(edit.curve_line(wild))) < 1e-12, "the line drawn is the curve"

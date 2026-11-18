@@ -542,6 +542,7 @@ Rectangle {
         local: true; changed: root.localHas(keys)
         visible: root.mode === "masks" && maskRow.mask !== null && !(tinted && root.mono)
         onReset: session.resetMaskEdit(wheel.mask, keys)
+        onCompare: (held) => session.setMaskBypass(wheel.mask, held ? keys : [])
     }
     component LocalSlider: ParamSlider {
         property string key
@@ -1768,7 +1769,7 @@ Rectangle {
                 objectName: "panel:pins"
                 // (In the wheel's own card, under the wheel; the owner: "cannot be a separate
                 // card, it needs to be inside the color wheel card below the tonewheel".)
-                title: "Pin"; tool: "pins"; visible: session.source !== ""
+                title: "Pin"; visible: session.source !== ""
                 plain: true; parent: pinSlot
                 // What it shows: the pin being worked on, or the color just marked as the pin
                 // it would be (it becomes one the moment anything here is moved). With neither
@@ -1844,26 +1845,42 @@ Rectangle {
                     path: Theme.cardIcon("wheel"); color: Theme.cardInk("wheel", wheelBlock.open ? Theme.text : Theme.dim)
                 }
                 Label {
+                    id: wheelTitle
                     x: 18 + Theme.cardSign + 8; y: Theme.cardMid - height / 2; text: "TONE WHEEL"
                     color: Theme.cardInk("wheel", wheelBlock.open ? Theme.text : Theme.dim)
                     font.pixelSize: Theme.titleSize; font.weight: Font.DemiBold; font.letterSpacing: 0.9
                 }
                 Label {   // which pins the wheel is showing and making (the Masks section chooses)
                     visible: wheelBlock.open && root.mode === "masks"
-                    anchors { right: wheelReset.left; rightMargin: 14 } y: Theme.cardMid - height / 2; font.pixelSize: Theme.smallSize; color: wheel.mask > 0 ? Theme.mark : Theme.dim
+                    anchors { right: wheelCompare.left; rightMargin: 14 } y: Theme.cardMid - height / 2; font.pixelSize: Theme.smallSize; color: wheel.mask > 0 ? Theme.mark : Theme.dim
                     text: wheel.mask > 0 ? "inside " + (session.masks, root.maskName(wheel.mask)) : "whole image"
                 }
-                // Reset, as every card has: the pins the wheel is showing go (the whole image's,
-                // or the chosen mask's), in one step of undo. Not the masks themselves, which
-                // the old screen's Pin tool took along.
+                // The head's dot, Reset and A/B, as every card has them (Panel.qml), about the
+                // pins the wheel is showing (the whole image's, or the chosen mask's): Reset
+                // takes them away in one step of undo, A/B held shows the photo without them.
+                // Not the masks themselves, which the old screen's Pin tool took along.
+                Rectangle {
+                    id: wheelDot
+                    visible: wheelReset.visible
+                    x: wheelTitle.x + wheelTitle.width + 10; y: Theme.cardMid - 4; width: 8; height: 8; radius: 4; color: Theme.mark
+                }
                 TextButton {
                     id: wheelReset
                     objectName: "reset:wheel"
-                    visible: wheelBlock.open
-                    anchors { right: parent.right; rightMargin: -2 } y: Theme.cardMid - height / 2
                     readonly property var kept: wheel.pins.filter(pin => (pin.mask || 0) !== wheel.mask)
-                    sign: Theme.resetSign; says: "Reset"; strong: true; available: kept.length < wheel.pins.length
+                    visible: kept.length < wheel.pins.length
+                    x: wheelDot.x + wheelDot.width + 12; y: Theme.cardMid - height / 2
+                    sign: Theme.resetSign; says: "Reset"; strong: true
                     onPressed: { wheel.deselect(); session.commitEdit(); session.setEdit("pins", kept); session.commitEdit() }
+                }
+                TextButton {
+                    id: wheelCompare
+                    objectName: "compare:wheel"
+                    anchors { right: parent.right; rightMargin: -2 } y: Theme.cardMid - height / 2
+                    text: "A/B"; says: "Compare"; strong: true; font.weight: Font.DemiBold
+                    font.pixelSize: Theme.titleSize; font.letterSpacing: 0.6
+                    available: wheelReset.visible
+                    onHeldChanged: session.setMaskBypass(wheel.mask, held ? ["pins"] : [])
                 }
                 Item {
                     id: maskRow

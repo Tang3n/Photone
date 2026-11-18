@@ -201,7 +201,7 @@ class Session(QObject):
         self._headroom = 2.0  # until the desktop says otherwise (set_headroom)
         self._error, self._info, self._failed, self._size = "", "", False, (0, 0)
         self._camera, self._raw, self._original, self._unwritten = None, False, False, False
-        self._bypass, self._small = "", None
+        self._bypass, self._bypass_local, self._small = "", (0, ()), None
         self._start_scopes()
         self.history = self._history()
         # (A moment after a change.)
@@ -1055,10 +1055,24 @@ class Session(QObject):
 
     def _uniforms(self) -> dict:
         # (The original is the photo without its edit, but in its frame: it must not jump.)
+        return self._numbers({k: v for k, v in self._compared().items()
+                              if not (self._original and k not in edit.FRAME)})
+
+    def _compared(self) -> dict:
+        """The edit without what a held A/B leaves out: a tool's settings (`setBypass`), or
+        some of a mask's own (`setMaskBypass`)."""
         shown = {k: v for k, v in self.history.edit.items()
-                 if not (self._original and k not in edit.FRAME)
-                 and k not in edit.TOOLS.get(self._bypass, ())}
-        return self._numbers(shown)
+                 if k not in edit.TOOLS.get(self._bypass, ())}
+        number, keys = self._bypass_local
+        if "pins" in keys and "pins" in shown:
+            shown["pins"] = [pin for pin in shown["pins"] if (pin.get("mask") or 0) != number]
+        if keys and 1 <= number <= len(shown.get("masks", [])):
+            masks = list(shown["masks"])
+            own = masks[number - 1].get("edit", {})
+            masks[number - 1] = {**masks[number - 1],
+                                 "edit": {k: v for k, v in own.items() if k not in keys}}
+            shown["masks"] = masks
+        return shown
 
     def _numbers(self, shown: dict) -> dict:
         """The shader's numbers for an edit of the photo on show."""
@@ -1073,8 +1087,7 @@ class Session(QObject):
         show (the photo's own, while the Crop tool shows all of the picture)."""
         if self._original:
             return []
-        shown = {k: v for k, v in self.history.edit.items()
-                 if k not in edit.TOOLS.get(self._bypass, ())}
+        shown = self._compared()
         return [{"mask": number, "numbers": {**self._numbers(local),
                                              **({"frame": frame} if frame else {})}}
                 for number, local in edit.layers(shown, self._camera)]
@@ -1278,6 +1291,13 @@ class Session(QObject):
     def setBypass(self, tool: str) -> None:  # noqa: N802
         """Show the photo without one tool's part of the edit, while its Compare is held."""
         self._bypass = tool
+        self.refresh()
+
+    @Slot(int, "QVariantList")
+    def setMaskBypass(self, number: int, keys: list) -> None:  # noqa: N802
+        """Show the photo without those settings of a mask's own edit, while the A/B of their
+        card is held; "pins": without the pins inside it (mask 0: the whole image's)."""
+        self._bypass_local = (number, tuple(keys))
         self.refresh()
 
     @Property("QVariantMap", notify=changed)
