@@ -1,0 +1,12 @@
+.venv/
+.dev/
+__pycache__/
+*.pyc
+.ruff_cache/
+.ponytail/
+
+# Private working notes and research (stay on this machine)
+docs/PLAN.md
+docs/next.md
+docs/open.md
+research/

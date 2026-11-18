@@ -1,0 +1,36 @@
+[project]
+name = "photone"
+version = "0.1.0"
+description = "A raw photo editor built around a color wheel"
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6>=6.8",   # Qt Quick: the window, the interface, and the GPU surface (SDR or HDR)
+    "rawpy>=0.24",    # LibRaw, bundled in the wheel: decodes camera raw files
+    "numpy>=2.0",     # the pixel arrays rawpy returns, packed for the GPU
+]
+
+[project.scripts]
+photone = "photone.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".ponytail", ".dev", "scripts", "research"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "C90", "PLR0913", "PLR0915"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 8
+
+[tool.ruff.lint.per-file-ignores]
+# Checks read best as long, flat lists of asserts.
+"tests/*" = ["E501", "PLR0915"]
+
+[tool.ruff.lint.pylint]
+max-statements = 25
+max-args = 5

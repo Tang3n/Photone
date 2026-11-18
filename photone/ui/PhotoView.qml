@@ -1,0 +1,394 @@
+import QtQuick
+import "."
+
+// The photo, and how it is looked at: fitted to the view, or at a zoom level and panned.
+// `zoom` is screen pixels per pixel of the full-size photo, whichever size is loaded, so 1 is
+// 100 %. `center` is the point of the photo (0..1 both ways) in the middle of the view.
+Item {
+    id: view
+    clip: true
+
+    // There is a picture of the current photo to draw. Not "the Image is Ready": while the full
+    // size is being fetched the half-size picture stays on screen, and it must stay visible.
+    property bool have: false
+    readonly property bool ready: have && !session.failed && session.fullWidth > 0
+    Connections { target: pixels; function onStatusChanged() { if (pixels.status === Image.Ready) view.have = true } }
+    Connections { target: session; function onPhotoChanged() { view.have = false } }
+
+    property bool fitted: true
+    property real zoom: 1
+    property point center: Qt.point(0.5, 0.5)
+    // (More while the Crop tool is open: room round the picture to take hold of it and turn it.)
+    readonly property real margin: session.panels.tool === "crop" ? 48 : 14
+    // What floats over the view's right edge (the rail of tools): Fit keeps clear of it, so
+    // that fitted means all of the photo can be seen. Closer than that, the photo goes under it.
+    property real clear: 0
+    readonly property real fitZoom: ready
+        ? Math.min((width - 2 * margin - clear) / session.fullWidth, (height - 2 * margin) / session.fullHeight) : 1
+    readonly property real shown: fitted ? fitZoom : zoom          // the zoom in effect
+    readonly property real minZoom: Math.min(fitZoom, 0.1)
+    readonly property real maxZoom: 8
+
+    function fit() { still(); fitted = true; center = Qt.point(0.5, 0.5) }
+    function actual() { glideTo(1, width / 2, height / 2, false) }
+
+    // The wheel, Fit and 1:1 glide to their zoom: very short, toward wherever was asked for
+    // last (a second notch during the glide goes on from where the picture is, to the step
+    // after the one the first was going to). Anything else that sets the zoom or moves the
+    // photo does it at once and ends a glide under way. (The owner: "a VERY subtle and fast
+    // interpolation ... always tween toward the latest desired zoom level", "zoom levels
+    // forced by anything else need to be instant".)
+    property var going: null   // the glide under way: from zoom z0 to z1, about a point, or to Fit
+    property real glide: 1     // how far along it is, 0..1
+    readonly property real aim: going ? going.z1 : shown   // the zoom it will have
+    NumberAnimation { id: zooming; target: view; property: "glide"; from: 0; to: 1; duration: 85; easing.type: Easing.OutCubic; onFinished: view.landed() }
+    function glideFit() { if (!fitted) glideTo(fitZoom, width / 2, height / 2, true) }
+    function still() { zooming.stop(); going = null }
+    function land() { if (zooming.running) zooming.complete() }   // (for the audits: there at once)
+    function glideTo(z, x, y, toFit) {
+        zooming.stop()
+        // (Out of Fit first, looking the same: from here on it is a zoom and a place.)
+        if (fitted) { zoom = fitZoom; center = Qt.point(center.x + clear / 2 / photo.width, center.y); fitted = false }
+        z = toFit ? fitZoom : Math.max(minZoom, Math.min(maxZoom, z))
+        going = { z0: zoom, z1: z, x: x, y: y, u: (x - photo.x) / photo.width, v: (y - photo.y) / photo.height, fit: toFit, from: center }
+        zooming.start()
+    }
+    onGlideChanged: {
+        if (!going || !zooming.running) return
+        const g = going, z = g.z0 * Math.pow(g.z1 / g.z0, glide)
+        if (!g.fit) return put(z, g.x, g.y, g.u, g.v, g.z1 < g.z0)
+        zoom = z
+        center = Qt.point(g.from.x + (0.5 - g.from.x) * glide, g.from.y + (0.5 - g.from.y) * glide)
+    }
+    function landed() {
+        const g = going
+        going = null
+        if (!g) return
+        if (g.fit) { fitted = true; center = Qt.point(0.5, 0.5) } else put(g.z1, g.x, g.y, g.u, g.v, g.z1 < g.z0)
+    }
+
+    // The wheel zooms by steps, the same ones every time, so that a zoom once left is come
+    // back to by turning the other way (the owner: "i cant go back to 1:1 just by scrolling
+    // around": the zoom used to be multiplied a little at every notch). Halves and thirds
+    // below 1:1, more above, and Fit among them wherever it lies.
+    readonly property var steps: [1 / 16, 1 / 12, 1 / 8, 1 / 6, 1 / 4, 1 / 3, 1 / 2, 2 / 3, 1, 1.5, 2, 3, 4, 6, 8]
+    property real turned: 0   // of the wheel, and not yet a whole notch (a touchpad sends many small parts)
+    function stepZoom(by, x, y) {
+        // Those that can be gone to: within the limits, and none a hair's breadth from Fit.
+        const near = z => Math.abs(z / fitZoom - 1) < 0.04
+        const all = steps.filter(z => z >= minZoom * 0.999 && z <= maxZoom && !near(z)).concat([fitZoom]).sort((a, b) => a - b)
+        // (From the zoom it is going to, if it is on its way: two notches are two steps.)
+        const next = by > 0 ? all.find(z => z > aim * 1.001) : all.reverse().find(z => z < aim * 0.999)
+        if (next === undefined) return
+        // (The size of Fit is one of the steps, but the wheel never puts the view on Fit: that
+        // moved the photo to the middle by itself; the owner: "scrolling shouldnt actually ever
+        // call Fit on its own". Fit is its button, a middle click or a double click.)
+        glideTo(next, x, y, false)
+    }
+
+    // How far the photo can be moved, at any zoom: until one of its corners is in the middle
+    // of the view, and no further. That is, the middle of the view is always on the photo.
+    function held(c) { return Math.max(0, Math.min(1, c)) }
+
+    // Zoom so that the point of the photo under (x, y) of the view stays under it. Zooming
+    // out, the photo is also gathered in: no edge of it comes into the view while it is
+    // larger than the view, and it stands in the middle once it is smaller. (Without that it
+    // slid off to one side on the way out and jumped back at Fit; the owner: "the image
+    // jumps around".)
+    function zoomTo(z, x, y) {
+        still()
+        z = Math.max(minZoom, Math.min(maxZoom, z))
+        put(z, x, y, (x - photo.x) / photo.width, (y - photo.y) / photo.height, z < shown)
+    }
+    // At that zoom, with the point (u, v) of the photo under (x, y) of the view; `out`: gathered in.
+    // Out as in: about the pointer, and nothing else moves the photo (the owner: "the photo
+    // should zoom out at the point where my cursor is"). It used to be gathered in on the
+    // way out, so that no edge came into the view while the photo was larger than it:
+    // that was for the wheel's step onto Fit, which put the photo in the middle with a
+    // jump; the wheel no longer goes onto Fit, and the gathering was itself a shift.
+    function put(z, x, y, u, v, out) {
+        const w = session.fullWidth * z, h = session.fullHeight * z
+        const left = x - u * w, top = y - v * h
+        fitted = false
+        zoom = z
+        center = Qt.point(held((width / 2 - left) / w), held((height / 2 - top) / h))
+    }
+    // Moving a fitted photo takes it out of Fit, at the size it has (Fit puts it back).
+    function panBy(dx, dy) {
+        // (And from where it is: fitted, it stood half the cleared strip to the left.)
+        still()
+        if (fitted) { zoom = fitZoom; center = Qt.point(center.x + clear / 2 / photo.width, center.y); fitted = false }
+        center = Qt.point(held(center.x - dx / photo.width), held(center.y - dy / photo.height))
+    }
+
+    // Two pictures of the photo on the GPU. The first (half size for a raw file, with mipmaps)
+    // is what a view of the whole photo is drawn from. The sharp one (full size) is fetched
+    // straight after it and used as soon as the view is closer than the first can show, so
+    // crossing that line costs nothing: both are already there.
+    readonly property alias picture: pixels   // for the scopes' renders
+    Image {
+        id: pixels
+        source: session.source
+        asynchronous: true; cache: false; mipmap: true; visible: false
+        retainWhileLoading: true
+    }
+    Image {
+        id: sharpPixels
+        // Asked for once the first picture is there: Qt fetches one at a time, in no promised
+        // order, and the first must not wait behind this one. (Its decoding runs regardless.)
+        source: view.have ? session.fullSource : ""
+        asynchronous: true; cache: false; visible: false
+    }
+    // Until the photo's first picture is there (0.03 s for a neighbor, 0.3 s for a photo that
+    // was not decoded ahead), its thumbnail stands in for it, fitted as the photo will be:
+    // the photo is on screen the moment it is asked for, soft, and sharp a moment later.
+    // (The owner: "it takes each photo about a second". An empty view for that long felt so.)
+    property string standIn: ""   // the address of the thumbnail's file, or none
+    // (Where and as large as the photo will be, also when the view is not on Fit: the zoom and
+    // the place stay from one photo to the next, and a thumbnail fitted to the view was then
+    // larger or smaller than the photo that took its place; the owner: "the lower quality
+    // image is bigger than the sharp one". The photo's size is not known yet: its longer side
+    // is taken to be that of the photo before it, which is so for photos of one camera.)
+    property real longest: 0   // of the last photo shown, in its own pixels
+    onReadyChanged: if (ready) longest = Math.max(session.fullWidth, session.fullHeight)
+    Image {
+        id: standing
+        objectName: "stand-in"
+        visible: !view.ready && !session.failed && view.standIn !== ""
+        readonly property bool placed: !view.fitted && view.longest > 0 && implicitWidth > 0
+        readonly property real by: placed ? view.longest * view.zoom / Math.max(implicitWidth, implicitHeight) : 1
+        x: placed ? Math.round(view.width / 2 - view.center.x * width) : view.margin
+        y: placed ? Math.round(view.height / 2 - view.center.y * height) : view.margin
+        width: placed ? implicitWidth * by : view.width - 2 * view.margin - view.clear
+        height: placed ? implicitHeight * by : view.height - 2 * view.margin
+        source: view.standIn; fillMode: Image.PreserveAspectFit; cache: false
+    }
+    // The photo's painted masks, as the picture the shader reads them from (session.painted).
+    // (Once it has been there it stays in use while the next one is fetched: the picture it
+    // had is kept meanwhile. Going by "is it ready now", every stroke's new picture put the
+    // photo's own colors in the masks' place for a frame; the owner: "the entire canvas
+    // flickers crazily".)
+    property bool brushedOnce: false
+    readonly property var painted: brushedOnce && session.paintedSource !== "" ? brushed : pixels
+    Image {
+        id: brushed
+        source: session.paintedSource; asynchronous: true; cache: false; visible: false; retainWhileLoading: true
+        onStatusChanged: if (status === Image.Ready) view.brushedOnce = true
+        onSourceChanged: if (String(source) === "") view.brushedOnce = false
+    }
+    readonly property bool sharpReady: sharpPixels.status === Image.Ready && sharpPixels.sourceSize.width > 1
+    readonly property bool useSharp: sharpReady && shown * session.wide > pixels.sourceSize.width * 1.01
+    // From 200 % the photo shows its own pixels as squares (pipeline.frag, `squarely`): only
+    // from the picture that has them all, not from the quick one while the other is awaited.
+    // (From 100 % for a while: the owner found 200 % "looks better that way".)
+    readonly property bool crisp: shown > 1.999 && (useSharp || pixels.sourceSize.width >= session.wide - 1)
+    Pipeline {
+        id: photo
+        objectName: "photo"
+        visible: view.ready
+        width: Math.round(session.fullWidth * view.shown * view.cropBy); height: Math.round(session.fullHeight * view.shown * view.cropBy)
+        x: Math.round((view.width - (view.fitted ? view.clear : 0)) / 2 - view.center.x * width + view.cropOff.x)
+        y: Math.round(view.height / 2 - view.center.y * height + view.cropOff.y)
+        source: pixels; painted: view.painted
+        sharp: view.sharpReady ? sharpPixels : pixels
+        useSharp: view.useSharp ? 1 : 0
+        crisp: view.crisp ? 1 : 0
+        cropDim: session.panels.tool === "crop" ? 1 : 0
+        cropBox: Qt.vector4d(session.framing.frame[0], session.framing.frame[1], session.framing.frame[2], session.framing.frame[3])
+        clipping: session.panels.clipping ? 1 : 0
+        // (The clipping paint's stripes run, a stripe every 0.6 s, only while it is on.)
+        NumberAnimation on stripes { running: session.panels.clipping && view.visible && view.ready; from: 0; to: 1; duration: 600; loops: Animation.Infinite }
+        reach: view.reach
+        showMask: view.showMask > 0 ? view.showMask : maskFrame.tinting ? -view.mask : 0
+        Local { over: photo; layers: session.maskLayers }
+    }
+
+    // The photo without its edit, left of a line that can be dragged (`split`: where the
+    // line is across the photo, 0..1; below zero there is none).
+    property real split: -1
+    Item {
+        id: beforeSide
+        visible: view.ready && view.split >= 0
+        x: photo.x; y: photo.y; width: photo.width * Math.max(0, view.split); height: photo.height
+        clip: true
+        Pipeline {
+            objectName: "photo-before"
+            width: photo.width; height: photo.height
+            source: pixels; sharp: photo.sharp; useSharp: photo.useSharp; crisp: photo.crisp
+            edit: session.before
+        }
+    }
+    signal clicked()   // the photo was pressed: the window's keys belong to it again
+    property int reach: 0   // 1 + the pin whose reach is shown instead of the picture (H held)
+    property int mask: 0       // the mask being worked on (1, 2, …): its shape is on the photo
+    property int showMask: 0   // the mask that is shown instead of the picture (H held)
+    // What the pointer does on the photo: "" (a click is just a click, a drag moves the
+    // photo), "range" (the next click picks a lightness for the wheel) or "neutral" (Pick
+    // neutral: it stays on, and a press on the photo, slid about, says at every move which
+    // spot should be gray: `sampled`, the first of a press marked so; `sampleDone` when let go).
+    property string picking: ""
+    signal picked(real u, real v)
+    signal sampled(real u, real v, bool first)
+    signal sampleDone()
+    signal maskLeft()   // a click away from the mask being worked on
+    signal tapped(real u, real v)   // a plain click on the photo, at that spot of it
+    property point hover: Qt.point(-1, -1)   // where the pointer is on the photo (0..1), or off it
+
+    // Zoom and pan with the mouse. A MouseArea, not a WheelHandler: that one never fired here.
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+        hoverEnabled: true
+        cursorShape: view.picking !== "" ? Qt.CrossCursor : pressed ? Qt.ClosedHandCursor : Qt.ArrowCursor
+        function place(mouse) { return Qt.point((mouse.x - photo.x) / photo.width, (mouse.y - photo.y) / photo.height) }
+        onExited: view.hover = Qt.point(-1, -1)
+        property point last
+        property real travelled   // since the press: a click is a press that went nowhere
+        property bool sampling: false   // this press is one of Pick neutral
+        onPressed: (mouse) => {
+            last = Qt.point(mouse.x, mouse.y); travelled = 0; view.clicked()
+            sampling = view.picking === "neutral" && mouse.button === Qt.LeftButton
+            if (sampling) view.sampled(place(mouse).x, place(mouse).y, true)
+            // The middle button fits the photo, as it goes down (the owner: "on mouseDown,
+            // not mouseUp"). Held and dragged on, it moves the photo from there.
+            // (At once, not gliding: a drag that follows moves it from Fit itself.)
+            if (mouse.button === Qt.MiddleButton) view.fit()
+        }
+        // Dragging moves the photo, with any button. (A plain click is kept free: it picks a
+        // neutral gray while that is asked for, and will pick a color once the wheel exists.)
+        onPositionChanged: (mouse) => {
+            if (pressed) {
+                travelled += Math.abs(mouse.x - last.x) + Math.abs(mouse.y - last.y)
+                if (sampling) view.sampled(place(mouse).x, place(mouse).y, false)
+                // (A middle click's own small slip does not move the photo off Fit.)
+                else if (!(mouse.buttons & Qt.MiddleButton) || travelled > 6) view.panBy(mouse.x - last.x, mouse.y - last.y)
+                last = Qt.point(mouse.x, mouse.y)
+            }
+            const at = place(mouse), on = view.ready && at.x >= 0 && at.x <= 1 && at.y >= 0 && at.y <= 1
+            view.hover = on ? at : Qt.point(-1, -1)
+        }
+        onReleased: (mouse) => {
+            if (sampling) { sampling = false; return view.sampleDone() }
+            const at = place(mouse)
+            if (mouse.button === Qt.MiddleButton) return   // (it fitted the photo as it went down)
+            // A click away from the mask being worked on lets go of it (also off the photo).
+            if (travelled <= 4 && view.mask > 0 && view.picking === "" && maskFrame.away(mouse.x - photo.x, mouse.y - photo.y)) return view.maskLeft()
+            if (travelled > 4 || at.x < 0 || at.x > 1 || at.y < 0 || at.y > 1) return
+            if (view.picking === "") view.tapped(at.x, at.y)
+            else view.picked(at.x, at.y)
+        }
+        // (The left button's alone: the middle one, pressed fast, was a double click too, and
+        // went to 1:1 and back; the owner: "spamming middle mouse ... zooms in".)
+        onDoubleClicked: (mouse) => { if (mouse.button === Qt.LeftButton && view.picking === "") view.fitted ? view.glideTo(1, mouse.x, mouse.y, false) : view.glideFit() }
+        // One notch of a wheel is 120, and a step of zoom (view.stepZoom). A touchpad, and a
+        // wheel that turns without notches, send small parts: they add up to steps.
+        onWheel: (wheel) => {
+            view.turned += wheel.angleDelta.y !== 0 ? wheel.angleDelta.y : wheel.pixelDelta.y * 2
+            const notches = Math.trunc(view.turned / 120)
+            view.turned -= notches * 120
+            for (let n = 0; n < Math.abs(notches); n++) view.stepZoom(Math.sign(notches), wheel.x, wheel.y)
+        }
+    }
+    // Pick neutral: the pointer is a pipette (a real cursor: app.TurnCursors), and beside it
+    // a square of the color it would take, the mean of a small patch there (the owner: "a
+    // square as a preview of the color that would be picked, maybe sampled from more than
+    // just one pixel").
+    readonly property bool dropper: picking === "neutral" && visible && hover.x >= 0
+    onDropperChanged: cursors.pipette(dropper)
+    Rectangle {
+        objectName: "neutral-spot"
+        visible: view.dropper && color.a > 0
+        x: photo.x + view.hover.x * photo.width + 16; y: photo.y + view.hover.y * photo.height + 14
+        width: 36; height: 36; radius: 4
+        color: view.dropper ? (session.histogram, session.shownAt(view.hover.x, view.hover.y)) || "transparent" : "transparent"
+        border { width: 1.5; color: Theme.text }
+        Rectangle { anchors { fill: parent; margins: -1.5 } radius: 5; color: "transparent"; border { width: 1; color: Theme.bg } }
+    }
+    // The split's line, to drag, and what is on either side of it.
+    Item {
+        id: divider
+        objectName: "split-line"
+        visible: beforeSide.visible
+        x: photo.x + photo.width * view.split - 10; y: photo.y; width: 20; height: photo.height
+        Rectangle { x: 9; width: 2; height: parent.height; color: Theme.text }
+        Rectangle { x: 4; y: parent.height / 2 - 14; width: 12; height: 28; radius: 4; color: Theme.text; border { width: 1; color: Theme.bg } }
+        MouseArea {
+            anchors.fill: parent; cursorShape: Qt.SizeHorCursor
+            onPositionChanged: (mouse) => view.split = Math.max(0, Math.min(1, (mapToItem(view, mouse.x, 0).x - photo.x) / photo.width))
+        }
+        Label { anchors { right: parent.left; rightMargin: 4 } y: 8; text: "Before"; color: Theme.text; style: Text.Outline; styleColor: Theme.bg }
+        Label { anchors { left: parent.right; leftMargin: 4 } y: 8; text: "After"; color: Theme.text; style: Text.Outline; styleColor: Theme.bg }
+    }
+    // While the picture is being straightened, the frame stays where it is on the screen and
+    // as large, and the picture turns under it (the owner: "when i rotate the crop rectangle,
+    // the crop rectangle moves around on the screen"). Left to itself the view shows all of
+    // the turned picture in the middle, which is larger at every angle, and the frame, which
+    // keeps its place on the picture, went round the picture's middle with it. So at each
+    // change of the angle the picture is scaled (`cropBy`) and shifted (`cropOff`) to put the
+    // frame back where it was; a moment after the last change both glide back to rest.
+    property real cropBy: 1
+    property point cropOff: Qt.point(0, 0)
+    property rect frameWas: Qt.rect(0, 0, 0, 0)   // the frame on the screen, at the last change that was no turn
+    property real angleWas: 0
+    function laid(by, off) {   // the frame on the screen, were the picture scaled and shifted so
+        const z = fitted ? Math.min((width - 2 * margin - clear) / session.fullWidth, (height - 2 * margin) / session.fullHeight) : zoom
+        const w = Math.round(session.fullWidth * z * by), h = Math.round(session.fullHeight * z * by), f = session.framing.frame
+        const x = Math.round((width - (fitted ? clear : 0)) / 2 - center.x * w + off.x), y = Math.round(height / 2 - center.y * h + off.y)
+        return Qt.rect(x + f[0] * w, y + f[1] * h, (f[2] - f[0]) * w, (f[3] - f[1]) * h)
+    }
+    function follow() {
+        const angle = session.framing.angle
+        if (session.panels.tool !== "crop" || !ready) {
+            resting.stop(); gliding.stop()
+            cropBy = 1; cropOff = Qt.point(0, 0); frameWas = Qt.rect(0, 0, 0, 0)
+        } else if (angle !== angleWas && frameWas.width > 0) {
+            gliding.stop()
+            const by = frameWas.width / Math.max(1, laid(1, Qt.point(0, 0)).width), scaled = laid(by, Qt.point(0, 0))
+            cropBy = by
+            cropOff = Qt.point(frameWas.x + frameWas.width / 2 - scaled.x - scaled.width / 2, frameWas.y + frameWas.height / 2 - scaled.y - scaled.height / 2)
+            resting.restart()
+        } else if (!resting.running) frameWas = laid(cropBy, cropOff)
+        angleWas = angle
+    }
+    Connections { target: session; function onChanged() { view.follow() } }
+    onWidthChanged: follow()
+    onHeightChanged: follow()
+    onCropByChanged: if (gliding.running) frameWas = laid(cropBy, cropOff)
+    Timer { id: resting; interval: 400; onTriggered: gliding.start() }
+    ParallelAnimation {
+        id: gliding
+        NumberAnimation { target: view; property: "cropBy"; to: 1; duration: 220; easing.type: Easing.OutCubic }
+        PropertyAnimation { target: view; property: "cropOff"; to: Qt.point(0, 0); duration: 220; easing.type: Easing.OutCubic }
+        onFinished: view.frameWas = view.laid(1, Qt.point(0, 0))
+    }
+    // The crop tool's frame, on the whole photo, while that tool is open.
+    property alias cropRatio: cropFrame.ratio
+    function reshape(ratio) { cropFrame.reshape(ratio) }
+    function flipCrop() { cropFrame.flip() }
+    CropFrame {
+        id: cropFrame
+        objectName: "crop-frame"
+        visible: view.ready && session.panels.tool === "crop"
+        x: photo.x; y: photo.y; width: photo.width; height: photo.height
+        onDone: view.clicked()
+    }
+    MaskFrame {
+        id: maskFrame
+        objectName: "mask-frame"
+        number: view.mask
+        visible: view.ready && session.panels.tool !== "crop" && mask !== null
+        x: photo.x; y: photo.y; width: photo.width; height: photo.height
+        onDone: view.clicked()
+        onSized: (size) => brushSize = Math.max(0.003, Math.min(0.3, size))
+    }
+    // The brush a painted mask is painted with (MaskFrame).
+    property alias brushSize: maskFrame.brushSize
+    property alias brushFeather: maskFrame.brushFeather
+    property alias erasing: maskFrame.erasing
+    property bool asking: false   // a question is open over the window: nothing is taken in here
+    DropArea {
+        anchors.fill: parent
+        enabled: !view.asking
+        onDropped: (drop) => { if (drop.hasUrls) session.open(drop.urls) }
+    }
+}

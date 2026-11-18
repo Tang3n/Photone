@@ -1,0 +1,27 @@
+singleton Theme 1.0 Theme.qml
+BalancePad 1.0 BalancePad.qml
+CurveEditor 1.0 CurveEditor.qml
+Histogram 1.0 Histogram.qml
+Label 1.0 Label.qml
+Panel 1.0 Panel.qml
+ParamSlider 1.0 ParamSlider.qml
+PhotoView 1.0 PhotoView.qml
+Pipeline 1.0 Pipeline.qml
+PushButton 1.0 PushButton.qml
+TextButton 1.0 TextButton.qml
+LightnessStrip 1.0 LightnessStrip.qml
+Segment 1.0 Segment.qml
+Wheel 1.0 Wheel.qml
+Scopes 1.0 Scopes.qml
+HueEditor 1.0 HueEditor.qml
+Library 1.0 Library.qml
+Bench 1.0 Bench.qml
+Export 1.0 Export.qml
+CropFrame 1.0 CropFrame.qml
+MaskFrame 1.0 MaskFrame.qml
+Scrollbar 1.0 Scrollbar.qml
+Ground 1.0 Ground.qml
+Filmstrip 1.0 Filmstrip.qml
+Local 1.0 Local.qml
+Icon 1.0 Icon.qml
+EditedMark 1.0 EditedMark.qml

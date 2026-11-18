@@ -1,0 +1,327 @@
+"""Turn a photo file into the pixels the pipeline draws.
+
+Every image leaves here the same way, whatever it was: scene-linear RGB in Rec.2020 primaries
+(D65), packed as RGBA half floats, top row first. That is what goes to the GPU as a float
+texture without touching the bytes, and what every later stage of the pipeline starts from.
+
+`load` does the work; `Workers` runs it in another process, so that a file which crashes the
+decoder costs one sentence in the window and not the window.
+"""
+
+from __future__ import annotations
+
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from multiprocessing.shared_memory import SharedMemory
+from pathlib import Path
+
+import numpy as np
+
+RAW = {".arw", ".cr2", ".cr3", ".dng", ".nef", ".orf", ".pef", ".raf", ".rw2"}
+RASTER = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+LUMA = (0.2627, 0.6780, 0.0593)  # how much of the lightness each of Rec.2020's colors is
+# What counts as a picture's top (`light_of`): the level only its brightest twentieth is above.
+# A lamp or a window smaller than that does not hold back where the exposure starts; a sky does.
+TOP = 95
+
+
+class Unreadable(Exception):
+    """This file cannot be shown; the message is for the user."""
+
+
+class Pixels:
+    """A decoded photo's pixels and whoever owns the memory. `close()` when done with `buf`."""
+
+    def __init__(self, buf, shared: SharedMemory | None = None) -> None:
+        self.buf, self.shared = buf, shared
+
+    def close(self) -> None:
+        if self.shared:
+            self.buf = None
+            self.shared.close()
+            self.shared.unlink()
+            self.shared = None
+
+
+def pack(rgb: np.ndarray) -> bytes:
+    """(h, w, 3) linear RGB, float 0..1, as RGBA half floats (the test chart: small)."""
+    out = np.ones((*rgb.shape[:2], 4), np.float16)
+    out[..., :3] = rgb
+    return out.tobytes()
+
+
+def meta(name: str, width: int, height: int, full: tuple[int, int] | None = None) -> dict:
+    """`full` is the photo's real size; width and height are what was decoded, which for a raw
+    file at half size is half of it. Zoom is measured against the real size."""
+    full = full or (width, height)
+    return {"name": name, "width": width, "height": height, "full": list(full),
+            "size": "full" if (width, height) == tuple(full) else "half",
+            "space": "rec2020-linear", "format": "rgba16f",
+            "raw": False,     # as the sensor measured it: it needs a profile to be a picture
+            "camera": None}   # what white balance needs to know (see `camera`), if known
+
+
+def camera(wb, cam_xyz) -> dict | None:
+    """The camera's own white balance (as gains, green = 1) and its matrix from XYZ to its own
+    colors; None when the file gives no usable ones, and white balance stays as shot."""
+    wb, cam_xyz = np.array(wb[:3], float), np.array(cam_xyz, float)[:3]
+    if not (wb > 0).all() or abs(np.linalg.det(cam_xyz)) < 1e-9:
+        return None
+    return {"wb": (wb / wb[1]).tolist(), "cam_xyz": cam_xyz.tolist()}
+
+
+def light_of(raw) -> list[float] | None:
+    """How light the picture is as the sensor recorded it, before any developing: [the median
+    lightness, the level that only the brightest twentieth of the picture is above (`TOP`), by
+    each cell's highest channel], shares of the sensor's white, with
+    the camera's white balance on. From one cell in 64 of the sensor's mosaic, so it is the
+    same whichever size is developed afterwards (the exposure a photo starts with goes by it:
+    edit.exposure_of). None for a sensor that is not a mosaic of red, green and blue."""
+    pattern, gains = raw.raw_pattern, np.array(raw.camera_whitebalance, float)
+    gains[3] = gains[3] or gains[1]
+    if pattern is None or pattern.shape != (2, 2) or raw.color_desc != b"RGBG" or gains.min() <= 0:
+        return None
+    mosaic, black = raw.raw_image_visible, raw.black_level_per_channel
+    # (The decoder takes the highest value in the file for the sensor's white when that is
+    # within a quarter of the nominal one: so does this.)
+    white = float(mosaic.max())
+    white = white if white > 0.75 * raw.white_level else float(raw.white_level)
+    high, wide = mosaic.shape[0] // 2 * 2, mosaic.shape[1] // 2 * 2
+    seen = [[], [], []]  # red, green (two to a cell), blue
+    for down, across in ((0, 0), (0, 1), (1, 0), (1, 1)):
+        color = int(pattern[down, across])
+        dark = float(black[color])
+        share = (mosaic[down:high:16, across:wide:16] - dark) / (white - dark)
+        seen[1 if color == 3 else color].append(np.clip(share * gains[color] / gains.min(), 0, 1))
+    red, green, blue = (np.mean(planes, axis=0) for planes in seen)
+    light = LUMA[0] * red + LUMA[1] * green + LUMA[2] * blue
+    top = np.maximum(np.maximum(red, green), blue)
+    return [float(np.median(light)), float(np.percentile(top, TOP))]
+
+
+def develop_raw(path: Path, half: bool) -> tuple[dict, np.ndarray]:
+    """Developed no further than demosaicing and the camera's white balance: (h, w, 3) uint16.
+
+    Half size skips interpolation (one pixel per 2x2 sensor cell): 0.17 s against 0.47 s for a
+    33 MP file, so it is what is shown first."""
+    import rawpy  # slow to import, and the checks run without a raw file
+
+    try:
+        with rawpy.imread(str(path)) as raw:
+            size = (raw.sizes.width, raw.sizes.height)  # before developing, which changes them
+            full = size[::-1] if raw.sizes.flip in (5, 6) else size  # turned on its side
+            about = camera(raw.camera_whitebalance, raw.rgb_xyz_matrix)
+            light = light_of(raw)
+            rgb = raw.postprocess(
+                half_size=half, gamma=(1, 1), no_auto_bright=True, output_bps=16,
+                use_camera_wb=True, output_color=rawpy.ColorSpace.Rec2020,
+                highlight_mode=rawpy.HighlightMode.Clip)
+    except (rawpy.LibRawError, OSError) as e:
+        raise Unreadable(f"{path.name}: {e}") from e
+    info = meta(path.name, rgb.shape[1], rgb.shape[0], full)
+    info.update(raw=True, camera=about, light=light)
+    return info, rgb
+
+
+def develop_raster(path: Path) -> tuple[dict, np.ndarray]:
+    """A JPEG, PNG or TIFF, turned by Qt from its own color space (sRGB when it names none)
+    into linear Rec.2020, upright: (h, w, 4) half floats."""
+    from PySide6.QtGui import QColorSpace, QImage, QImageReader
+
+    reader = QImageReader(str(path))
+    reader.setAutoTransform(True)  # the camera's "which way is up"
+    image = reader.read()
+    if image.isNull():
+        raise Unreadable(f"{path.name}: {reader.errorString()}")
+    if not image.colorSpace().isValid():
+        image.setColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgb))
+    image.convertTo(QImage.Format.Format_RGBX16FPx4)
+    image.convertToColorSpace(QColorSpace(QColorSpace.Primaries.Bt2020,
+                                          QColorSpace.TransferFunction.Linear))
+    pixels = np.frombuffer(image.constBits(), np.float16).reshape(image.height(), image.width(), 4)
+    return meta(path.name, image.width(), image.height()), pixels.copy()  # `image` ends here
+
+
+def develop(path: Path, half: bool) -> tuple[dict, np.ndarray]:
+    kind = path.suffix.lower()
+    if kind in RAW:
+        return develop_raw(path, half)
+    if kind in RASTER:
+        return develop_raster(path)
+    raise Unreadable(f"{path.name}: not a kind of photo Photone can open")
+
+
+HALF = (np.arange(65536) / 65535).astype(np.float16)  # a 16-bit integer as a half float
+BANDS = min(8, os.cpu_count() or 1)
+
+
+def store(pixels: np.ndarray, buf) -> None:
+    """Write developed pixels into `buf` as RGBA half floats: a raw file's three channels of
+    16-bit integers (full scale = 1) looked up in a table, the fourth set to 1; a finished
+    picture's half floats as they are.
+
+    In one pass, straight to where they are wanted, in bands on threads (numpy lets other
+    threads run meanwhile): 0.04 s for 33 MP. (Before 2026-11-17 it was four passes, 0.2 s:
+    integers into four channels, Qt making them floats, a copy into shared memory.)"""
+    out = np.ndarray((*pixels.shape[:2], 4), np.float16, buffer=buf)
+    if pixels.shape[2] == 4:
+        out[...] = pixels
+        return
+
+    def band(k: int) -> None:
+        rows = slice(len(out) * k // BANDS, len(out) * (k + 1) // BANDS)
+        out[rows, :, :3] = HALF[pixels[rows]]
+        out[rows, :, 3] = 1
+
+    with ThreadPoolExecutor(BANDS) as bands:
+        list(bands.map(band, range(BANDS)))
+
+
+def load(path: Path, half: bool = True) -> tuple[dict, Pixels]:
+    """In this process. The checks use it; the app goes through Workers."""
+    info, pixels = develop(path, half)
+    buf = bytearray(info["width"] * info["height"] * 8)
+    store(pixels, buf)
+    return info, Pixels(buf)
+
+
+def load_shared(path: Path, half: bool) -> tuple[dict, str]:
+    """In the worker: the pixels go into shared memory, and only its name travels back.
+    (Through a pipe, 264 MB of them took a quarter of a second.)"""
+    info, pixels = develop(path, half)
+    w, h = info["width"], info["height"]
+    shared = SharedMemory(create=True, size=w * h * 8)
+    store(pixels, shared.buf)
+    shared.close()
+    return info, shared.name
+
+
+class Workers:
+    """Decoding in other processes. Two decode the photo that is asked for, its quick
+    half-size picture and its full-size one side by side. Two more, at a lower priority and
+    with fewer threads, decode ahead what is likely to be asked for next (`ahead`). Kept
+    apart so that decoding ahead never stands in the way of the photo that is wanted: sharing
+    two workers, a click on a photo further along waited 0.7 s behind the neighbors' decoding."""
+
+    def __init__(self, first: Path | None = None) -> None:
+        """`first`: a photo that will be asked for at once (the one named on the command
+        line). Its decoding starts now, in both sizes, while the window is still being made."""
+        self.pool, self.calm = self._start(), self._start(calm=True)
+        self.early = {(first, half): self.pool.submit(load_shared, first, half)
+                      for half in ((True, False) if first and first.suffix.lower() in RAW
+                                   else (True,) if first else ())}
+        self.before: dict = {}  # what is being or has been decoded ahead of being asked for
+
+    @staticmethod
+    def _start(calm: bool = False) -> ProcessPoolExecutor:
+        # spawn, not fork: a copy of a process with Qt and a GPU driver in it is not safe.
+        pool = ProcessPoolExecutor(2, mp_context=multiprocessing.get_context("spawn"),
+                                   initializer=_begin, initargs=(os.getpid(), calm))
+        for _ in range(2):
+            pool.submit(_warm)  # start them and import the decoders now, not at the first photo
+        return pool
+
+    def call(self, function, *args):
+        try:
+            return self.pool.submit(function, *args).result()
+        except BrokenProcessPool:
+            self.pool = self._start()  # the worker died: the next photo gets a new one
+            raise Unreadable("the decoder crashed on this file") from None
+
+    def ahead(self, wanted: list[tuple[Path, bool]], begin: bool = True) -> None:
+        """What is worth having before it is asked for (each a photo and whether its quick
+        half-size picture or its full one): what is next to the open photo, so that stepping
+        there shows it at once (0.3 s otherwise, and 0.7 s until it is sharp). What was
+        decoded ahead and is not among them is given up; what is missing is begun, unless
+        `begin` is false (a photo has just been asked for: first that one)."""
+        wanted = [(path, half) for path, half in wanted
+                  if path.suffix.lower() in RAW or (half and path.suffix.lower() in RASTER)]
+        for key in [key for key in self.before if key not in wanted]:
+            self._give_up(self.before.pop(key))
+        for key in wanted if begin else ():
+            if key not in self.before:
+                try:
+                    self.before[key] = self.calm.submit(load_shared, *key)
+                except BrokenProcessPool:
+                    self.calm = self._start(calm=True)
+                except RuntimeError:
+                    pass  # shut down
+
+    @staticmethod
+    def _give_up(future) -> None:
+        """A decoding nobody will ask for: not begun if it can still be helped, and the
+        memory its pixels are in given back when it is done."""
+        def free(done) -> None:
+            if not done.cancelled() and not done.exception():
+                Pixels(None, SharedMemory(name=done.result()[1])).close()
+
+        if not future.cancel():
+            future.add_done_callback(free)
+
+    def load(self, path: Path, half: bool = True) -> tuple[dict, Pixels]:
+        # (May be called from two threads at once.) Decoded ahead, or being so: that one. Still
+        # waiting its turn there: not that one, the workers for what is asked for are free.
+        early = self.early.pop((path, half), None) or self.before.pop((path, half), None)
+        if early and early.cancel():
+            early = None
+        try:
+            info, name = early.result() if early else self.call(load_shared, path, half)
+        except BrokenProcessPool:
+            self.pool = self._start()
+            raise Unreadable(f"{path.name}: the decoder crashed on this file") from None
+        except Unreadable as e:
+            raise Unreadable(str(e) if path.name in str(e) else f"{path.name}: {e}") from None
+        shared = SharedMemory(name=name)
+        return info, Pixels(shared.buf, shared)
+
+    def close(self) -> None:
+        self.ahead([])
+        for pool in (self.pool, self.calm):
+            pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _begin(parent: int, calm: bool = False) -> None:
+    """In the worker, first thing: end when the program that started it ends, however it ends.
+    Without this a killed Photone leaves its worker behind for good (seen). `calm`: a worker
+    that decodes ahead: it gives way to everything else, and its decoder gets a quarter of
+    the cores (a 33 MP file then takes 0.64 s where it takes 0.48 s on all sixteen: most of
+    that work is not shared out anyway, and nobody is waiting for it)."""
+    import ctypes
+    import signal
+
+    ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
+    # Ctrl+C in the terminal reaches every process of the program; the program ends its
+    # workers itself (`Workers.close`). Each of them printed a traceback of it.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if os.getppid() != parent:  # it ended before we could ask
+        os._exit(0)
+    if calm:
+        os.nice(10)
+        # (Before the decoder is loaded: it reads this once.)
+        os.environ["OMP_NUM_THREADS"] = str(max(2, (os.cpu_count() or 2) // 4))
+
+
+def _warm() -> None:
+    import time
+
+    import rawpy  # noqa: F401
+    time.sleep(0.05)  # long enough that the second warm-up goes to the second worker
+
+
+def synthetic(width: int = 240, height: int = 160) -> tuple[dict, Pixels]:
+    """A test chart with no file behind it, for the checks and the shots: hue across, lightness
+    down, and a gray step wedge along the bottom (neutral must stay neutral)."""
+    x = np.linspace(0, 1, width, dtype=np.float32)[None, :, None]
+    y = np.linspace(0, 1, height, dtype=np.float32)[:, None, None]
+    phase = np.array([0, 1 / 3, 2 / 3], np.float32)[None, None, :]
+    hue = 0.5 + 0.5 * np.cos(2 * np.pi * (x - phase))
+    rgb = (0.03 + 0.6 * (1 - y) ** 2.2) * (0.35 + 0.65 * hue)
+    wedge = (np.minimum(np.floor(x * 8), 7) / 7) ** 2.2 * np.ones((1, 1, 3), np.float32)
+    rgb = np.where(y > 0.82, wedge, rgb)
+    info = meta("test chart", width, height)
+    info.update(raw=True, camera=camera(  # a real camera's figures, so the chart develops
+        [2.32, 1.0, 1.61], [[0.746, -0.2365, -0.0588], [-0.5687, 1.3442, 0.2474],
+                            [-0.0624, 0.1156, 0.6584]]))
+    return info, Pixels(pack(rgb))
