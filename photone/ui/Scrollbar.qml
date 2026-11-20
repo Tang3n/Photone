@@ -22,9 +22,17 @@ Item {
     readonly property bool lit: grab.containsMouse || grab.pressed
     visible: reach > 0.5
     implicitWidth: 14; implicitHeight: 14
-    function go(to) {
-        to = Math.max(0, Math.min(reach, to))
-        if (across) of.contentX = of.originX + to; else of.contentY = of.originY + to
+    function go(to) { put((across ? of.originX : of.originY) + to) }
+    // The wheel moves the view by where it is among its own contents (contentX), not by how
+    // far it is from the start (`at`): a list whose rows are not all of one size (the
+    // filmstrip, where a photo and its denoised copy stand wider) guesses anew where its start
+    // is as rows are made, and a glide that was put back on that start at every frame jumped
+    // by as much as the guess moved (the owner: "the scroll jumps somewhere").
+    readonly property real place: of ? (across ? of.contentX : of.contentY) : 0
+    function put(to) {
+        const start = across ? of.originX : of.originY
+        to = Math.max(start, Math.min(start + reach, to))
+        if (across) of.contentX = to; else of.contentY = to
     }
     function turned(wheel) {
         if (reach <= 0.5) return
@@ -32,11 +40,12 @@ Item {
         const notches = wheel.angleDelta.y !== 0 ? wheel.angleDelta.y : wheel.angleDelta.x
         // (Asked before the glide is stopped: a notch during one goes on from where that one
         // was going, so a wheel turned fast goes as far as its notches say, and so faster.)
-        const from = gliding ? aim : at
+        const from = gliding ? aim : place
         glide.stop()
-        if (pixels !== 0 && notches % 120 !== 0) return go(at - pixels)   // a touchpad: as far as it says
-        glide.from = at
-        glide.to = Math.max(0, Math.min(reach, from - notches / 120 * step))
+        if (pixels !== 0 && notches % 120 !== 0) return put(place - pixels)   // a touchpad: as far as it says
+        const start = across ? of.originX : of.originY
+        glide.from = place
+        glide.to = Math.max(start, Math.min(start + reach, from - notches / 120 * step))
         aim = glide.to
         glide.start()
     }
@@ -44,7 +53,7 @@ Item {
     readonly property bool gliding: glide.running
     // (It glides by a number of its own, so that it works the same upright and flat.)
     NumberAnimation { id: glide; target: slide; property: "at"; duration: 110; easing.type: Easing.OutCubic }
-    QtObject { id: slide; property real at: 0; onAtChanged: if (glide.running) bar.go(at) }
+    QtObject { id: slide; property real at: 0; onAtChanged: if (glide.running) bar.put(at) }
     Rectangle {   // the place marked
         visible: bar.mark >= 0
         x: bar.across ? Math.round(bar.mark * (bar.width - 3)) : 2

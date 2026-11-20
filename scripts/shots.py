@@ -3235,6 +3235,71 @@ def audit_strip() -> list[str]:
     return faults
 
 
+def audit_strip_wheel() -> list[str]:
+    """Every notch of the wheel moves the filmstrip by one notch's way, also in a long folder
+    where denoised copies stand as wider pairs: there the view guesses anew where the row
+    begins as it makes cells, and a glide put back on that guess at every frame jumped (the
+    owner: "the scroll jumps somewhere"; up to twice a notch, measured)."""
+    home = Path(SHELF.name) / "strip-wheel"
+    folder = home / "photos" / "long"
+    folder.mkdir(parents=True)
+    for n in range(80):
+        fixtures.picture_file(folder / f"IMG_{4100 + n}.jpg", fixtures.exif("SONY", "ILCE-7M4", f"2026:06:10 10:{n // 60:02}:{n % 60:02}", 1),
+                              (600, 900) if n % 7 == 3 else (900, 600))
+    kept = catalog.Catalog(home / "catalog.db")
+    kept.add_folder(folder)
+    kept.found(*library.scan(folder, kept.known(folder)))
+    for photo in kept.photos():
+        library.thumbnail(Path(photo["path"]), photo["key"], home / "thumbs")
+    shown = library.Library(kept, home / "thumbs")
+    shown.setFilter("raw", False)
+    for n in (2, 9, 20, 30, 31, 45, 60, 70):  # (as `pair` does)
+        shown.made_here[shown.paths()[n + 1]] = {"of": shown.model.rows[n]["key"]}
+    session = ui.Session([])
+    view = ui.make_view(session, shown)
+    session.surface_known(False)
+    view.resize(1000, 700)
+    root = view.rootObject()
+    root.setSize(view.size())
+    session.openAt(shown.paths(), 5)
+    call(root, "show", "edit")
+    wait(lambda: root.property("photoReady"))
+    settle()
+    view.grabWindow()
+    faults = Faults()
+    row, step = find(root, "strip-row"), find(root, "strip-bar").property("step")
+    left, right = box(row).left(), box(row).right()
+
+    def seen() -> dict:
+        return {i.property("index"): box(i).x() for i in items(row) if i.objectName().startswith("strip:") and left - 300 < box(i).x() < right}
+
+    def turn(notches: int) -> None:
+        spot = QPointF(box(row).center())
+        QCoreApplication.sendEvent(view, QWheelEvent(spot, spot, QPoint(0, 0), QPoint(0, notches), Qt.MouseButton.NoButton,
+                                                     Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False))
+        clock = QElapsedTimer()
+        clock.start()
+        while clock.elapsed() < 300:  # (frame by frame: the view makes its cells as it glides)
+            QTest.qWait(10)
+            view.grabWindow()
+
+    moves = []
+    for notches, times in ((-120, 14), (120, 6), (-120, 12), (120, 10)):
+        for _ in range(times):
+            was, start = seen(), row.property("contentX") - row.property("originX")
+            turn(notches)
+            now, both = seen(), set(was) & set(seen())
+            moved = sorted(now[k] - was[k] for k in both)[len(both) // 2] if both else 0
+            ends = start < step + 2 or start > row.property("contentWidth") - row.width() - step - 2
+            # (A few px is a pair's cell settling once its thumbnail is in, not the wheel.)
+            if not ends and abs(abs(moved) - step) > 4:
+                moves.append(round(moved))
+    faults.expect(not moves, f"notches of the wheel that did not move the strip {step:.0f} px: {moves}")
+    shown.close()
+    ui.close_view(view)
+    return faults
+
+
 def audit_menu() -> list[str]:
     """A right click on a photo, with a real mouse: in the library it is for what is selected
     (or selects the photo), in the filmstrip for that photo; Reset edits asks first, takes the
@@ -5276,7 +5341,7 @@ def audit_brush() -> list[str]:
 AUDITS = {"(keys)": audit_stepping, "(dock)": audit_dock, "(column)": audit_column, "(wheel)": audit_wheel,
           "(wheel data)": audit_wheel_data, "(dots)": audit_dots_place, "(pixels)": audit_pixels, "(colors data)": audit_colors_data, "(pins)": audit_pins,
           "(pin panel)": audit_pin_panel,
-          "(masks)": audit_masks, "(brush)": audit_brush, "(mask wheel)": audit_mask_wheel, "(masks data)": audit_masks_data, "(moves)": audit_moves, "(scroll)": audit_scroll, "(resume)": audit_resume, "(strip)": audit_strip, "(local)": audit_local, "(fourth)": audit_fourth, "(mono)": audit_mono, "(detail)": audit_detail, "(lens)": audit_lens, "(fringes)": audit_fringes, "(mark)": audit_mark, "(grain)": audit_grain, "(look)": audit_look, "(presets)": audit_presets, "(lut)": audit_lut, "(table)": audit_table, "(menu)": audit_menu, "(color tools)": audit_color_tools,
+          "(masks)": audit_masks, "(brush)": audit_brush, "(mask wheel)": audit_mask_wheel, "(masks data)": audit_masks_data, "(moves)": audit_moves, "(scroll)": audit_scroll, "(resume)": audit_resume, "(strip)": audit_strip, "(strip wheel)": audit_strip_wheel, "(local)": audit_local, "(fourth)": audit_fourth, "(mono)": audit_mono, "(detail)": audit_detail, "(lens)": audit_lens, "(fringes)": audit_fringes, "(mark)": audit_mark, "(grain)": audit_grain, "(look)": audit_look, "(presets)": audit_presets, "(lut)": audit_lut, "(table)": audit_table, "(menu)": audit_menu, "(color tools)": audit_color_tools,
           "(test chart)": audit_test_chart, "(library)": audit_library, "(export)": audit_export,
           "(frame)": audit_frame, "(crop)": audit_crop, "(slider)": audit_slider, "(tools)": audit_tools,
           "(curve)": audit_curve, "(balance)": audit_balance, "(start)": audit_start, "(tone)": audit_tone, "(scopes)": audit_scopes,
