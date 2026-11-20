@@ -1749,6 +1749,14 @@ def check_session_tools() -> None:
     assert seen["contrast"] == 0 and seen["shadows"] == 0 and seen["curveOn"] == 0, "without Tone (its curve too), and only Tone"
     session.setBypass("")
     assert session.uniforms["contrast"] > 0
+    # A card whose settings do something at rest: its A/B shows the photo without them, and
+    # is there to be held though nothing of the card was changed.
+    assert session.uniforms["sharpen"] > 0 and not session.adjusted["detail"] and session.comparable["detail"] and not session.comparable["eq"]
+    session.setBypass("detail")
+    assert session.uniforms["sharpen"] == 0 and session.uniforms["denoise"] == 0 and session.uniforms["denoiseColor"] == 0
+    session.setBypass("")
+    assert not session.comparable["lens"], "a file without figures of its lens: nothing to compare"
+    assert edit.uniforms({k: v for k, v in edit.IDLE.items() if k.startswith("lens")}, {**edit.FINISHED, "lens": {"distortion": [0] * 15 + [900]}}, False, shape=1.5)["lensOn"] == 0
     steps = session.history.at
     session.resetTool("tone")
     assert session.history.edit == {"saturation": 120.0} and session.history.at == steps + 1

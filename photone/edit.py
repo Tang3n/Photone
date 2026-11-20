@@ -93,6 +93,10 @@ TOOLS = {"tone": ("profile", "exposure", "contrast", "brightness", "highlights",
          "lens": ("lensDistortion", "lensColor", "lensVignetting", "defringe"),
          "mono": ("bw",),  # (the look; black and white itself is a switch, no tool's setting)
          "crop": FRAME}
+# The settings that do something at rest (lens corrections are on, a photo is sharpened a
+# little), and what they are when they do nothing: what a card's A/B shows the photo with.
+IDLE = {"lensDistortion": False, "lensColor": False, "lensVignetting": False,
+        "sharpen": 0.0, "denoise": 0.0, "denoiseColor": 0.0}
 POINTS = 16     # of a tone curve: what the shader's three matrices hold
 GAP = 0.01      # the least two neighboring curve points are apart, left to right
 PINS = 12       # color pins a photo can have: what the shader's nine matrices hold

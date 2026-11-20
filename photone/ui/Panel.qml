@@ -86,7 +86,7 @@ Column {
             y: Theme.cardMid - height / 2; anchors { right: parent.right; rightMargin: -2 }
             text: "A/B"; says: "Compare"; strong: true; font.weight: Font.DemiBold
             font.pixelSize: Theme.titleSize; font.letterSpacing: 0.6
-            available: panel.altered
+            available: panel.local ? panel.altered : session.comparable[panel.tool] === true
             onHeldChanged: panel.local ? panel.compare(held) : session.setBypass(held ? panel.tool : "")
         }
     }

@@ -1107,11 +1107,19 @@ class Session(QObject):
         return self._numbers({k: v for k, v in self._compared().items()
                               if not (self._original and k not in edit.FRAME)})
 
+    def _without(self, tool: str) -> dict:
+        """The edit without one tool's part: its settings doing nothing, which for most is
+        their rest and for some is not (edit.IDLE: with them at rest, the Lens card's A/B
+        showed the corrections still on; the owner: "A/B doesnt seem to work on the LENS
+        card")."""
+        keys = edit.TOOLS.get(tool, ())
+        return {**{k: v for k, v in self.history.edit.items() if k not in keys},
+                **{k: edit.IDLE[k] for k in keys if k in edit.IDLE}}
+
     def _compared(self) -> dict:
         """The edit without what a held A/B leaves out: a tool's settings (`setBypass`), or
         some of a mask's own (`setMaskBypass`)."""
-        shown = {k: v for k, v in self.history.edit.items()
-                 if k not in edit.TOOLS.get(self._bypass, ())}
+        shown = self._without(self._bypass)
         number, keys = self._bypass_local
         if "pins" in keys and "pins" in shown:
             shown["pins"] = [pin for pin in shown["pins"] if (pin.get("mask") or 0) != number]
@@ -1331,6 +1339,18 @@ class Session(QObject):
         """For each tool, whether any of its settings is off its rest: the dot on its icon."""
         return self._once("adjusted", lambda: {tool: any(k in self.history.edit for k in keys)
                                                for tool, keys in edit.TOOLS.items()})
+
+    @Property("QVariantMap", notify=changed)
+    def comparable(self) -> dict:
+        """For each tool, whether its A/B has anything to show: a setting off its rest, or
+        one that does something at rest (to this photo: lens corrections do nothing to a
+        file without figures)."""
+        def acts(tool: str) -> bool:
+            if not any(k in edit.IDLE for k in edit.TOOLS[tool]):
+                return False
+            return self._numbers(self.history.edit) != self._numbers(self._without(tool))
+        return self._once("comparable", lambda: {tool: on or acts(tool)
+                                                 for tool, on in self.adjusted.items()})
 
     @Slot(str)
     def resetTool(self, tool: str) -> None:  # noqa: N802
