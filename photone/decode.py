@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from photone import lens
+from photone import dng, lens
 
 RAW = {".arw", ".cr2", ".cr3", ".dng", ".nef", ".orf", ".pef", ".raf", ".rw2"}
 RASTER = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -64,6 +64,7 @@ def meta(name: str, width: int, height: int, full: tuple[int, int] | None = None
             "size": "full" if (width, height) == tuple(full) else "half",
             "space": "rec2020-linear", "format": "rgba16f",
             "raw": False,     # as the sensor measured it: it needs a profile to be a picture
+            "denoised": False,  # written by Photone's neural denoiser (photone/dng.py)
             "camera": None}   # what white balance needs to know (see `camera`), if known
 
 
@@ -131,10 +132,22 @@ def kept(sizes, half: bool) -> tuple[slice, slice]:
 
 
 def develop_raw(path: Path, half: bool) -> tuple[dict, np.ndarray]:
-    """Developed no further than demosaicing and the camera's white balance: (h, w, 3) uint16.
+    """Developed no further than demosaicing and the camera's white balance: (h, w, 3) uint16
+    (a photo Photone denoised: (h, w, 4) half floats, as it was written).
 
     Half size skips interpolation (one pixel per 2x2 sensor cell): 0.17 s against 0.47 s for a
     33 MP file, so it is what is shown first."""
+    try:
+        ours = dng.read(path, half) if path.suffix.lower() == ".dng" else None
+    except (OSError, ValueError) as e:
+        raise Unreadable(str(e) if path.name in str(e) else f"{path.name}: {e}") from e
+    if ours:
+        # A photo Photone's neural denoiser wrote: no mosaic, and floats, which LibRaw would
+        # round. It comes with what the original's camera said (dng.read).
+        kept_, pixels = ours
+        info = meta(path.name, pixels.shape[1], pixels.shape[0], kept_["full"])
+        info.update(raw=True, camera=kept_["camera"], light=kept_["light"], denoised=True)
+        return info, pixels
     import rawpy  # slow to import, and the checks run without a raw file
 
     try:

@@ -20,8 +20,11 @@ if [ "${1:-}" = "--uninstall" ]; then
   exit
 fi
 
+echo "Installing Photone: Python, Qt, the raw decoder, and the denoiser's ONNX Runtime with"
+echo "NVIDIA's CUDA libraries. A first install downloads some 2 GB; uv shows each download."
 uv tool install --force --reinstall --python "$(cat "$here/.python-version")" "$here"
 command="$(uv tool dir --bin)/photone"  # in full: a desktop's menu may not have it on its PATH
+echo "Adding Photone to the desktop's menu ..."
 install -Dm644 "$here/photone/ui/icon.svg" "$icon"
 mkdir -p "$(dirname "$entry")"
 cat > "$entry" <<END

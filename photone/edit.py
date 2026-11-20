@@ -1250,6 +1250,9 @@ def uniforms(edit: dict, camera: dict | None, raw: bool, white: float = 1.0,  # 
     width over its height, which the masks go by; `wide`: how many pixels it is across, which
     sharpening and noise reduction go by."""
     full = {**DEFAULTS, **edit}
+    if camera and camera.get("denoised"):
+        # A photo the neural denoiser wrote has had its noise taken out: none of this one.
+        full.update(denoise=0.0, denoiseColor=0.0)
     to_cam, from_cam, wb = balance(full, camera)
     c, s, k = curve(full["profile"]) if raw else (0.0, 1.0, 1.0)  # 0: no curve
     out = {"gain": 2.0 ** exposure_of(full, camera), "wbGain": wb,

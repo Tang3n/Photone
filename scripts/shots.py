@@ -205,8 +205,36 @@ def photo() -> ui.Session:
     return ui.Session([Path("test chart.arw")], load=chart)
 
 
+def pair(n: int) -> None:
+    """The shelf's photo after the n-th passes for the n-th's denoised copy (what its file
+    would say of itself, put where the library keeps that)."""
+    shown = ON_SHELF[0]
+    shown.made_here[shown.paths()[n + 1]] = {"of": shown.model.rows[n]["key"]}
+
+
 def stage(root):
     return root.findChild(QObject, "box:stage")
+
+
+def neural(root, session, state: str, share: float = 1.0) -> None:
+    """The Neural Denoise window in one of its states, without the net (which wants a real raw
+    file and seconds of a GPU): "working" at `share` of the way, "ready" with the chart itself
+    as the net's result, or "failed"."""
+    from photone import denoise
+
+    denoiser = session.denoiser
+    denoiser._path = session.photos[0]
+    if state == "ready":
+        meta, pixels = chart(session.photos[0], False)
+        seen = np.frombuffer(pixels.buf, np.float16).reshape(meta["height"], meta["width"], 4)
+        noisy = np.clip(seen[..., :3].astype(np.float32) * 65535, 0, 65535).astype(np.uint16)
+        held = denoise.Denoised(noisy, {**meta["camera"], "a": 1.0, "b": 10.0, "room": 15000.0})
+        held.clean[...], held.where = held.into(noisy), "CUDA"
+        denoiser.held, denoiser.pixels = held, held.picture()
+    denoiser._run += 1  # (another address for its picture)
+    denoiser._set(state, "IMG_0001.ARW cannot be read as a raw photo (data error)." if state == "failed" else "", share)
+    find(root, "denoise-window").setProperty("visible", True)
+    find(root, "denoise-cancel").forceActiveFocus()  # (as its `open` does: the keys are its own)
 
 
 def call(item, function: str, *args):
@@ -508,6 +536,12 @@ SHOTS = {
         wait(lambda: ON_SHELF[0].making == 0 and not ON_SHELF[0].strip, 4000), view_of(root).grabWindow(),
         find(root, "strip-row").setProperty("contentX", 700), settle(), view_of(root).grabWindow(),
         QTest.mouseMove(view_of(root), box(find(root, "strip:8")).center().toPoint()))),
+    "strip-pair": (BIG, empty, lambda root, session: (
+        pair(3), pair(8), session.openAt(ON_SHELF[0].paths(), 4), call(root, "show", "edit"), wait(lambda: root.property("photoReady")),
+        root.setProperty("stripHigh", 140), wait(lambda: ON_SHELF[0].making == 0 and not ON_SHELF[0].strip, 4000))),
+    "strip-pair-usual": (BIG, empty, lambda root, session: (
+        pair(3), pair(8), session.openAt(ON_SHELF[0].paths(), 3), call(root, "show", "edit"), wait(lambda: root.property("photoReady")),
+        wait(lambda: ON_SHELF[0].making == 0 and not ON_SHELF[0].strip, 4000))),
     "strip-small": (SMALL, empty, lambda root, session: (
         session.openAt(ON_SHELF[0].paths(), 9), call(root, "show", "edit"), wait(lambda: root.property("photoReady")),
         root.setProperty("stripHigh", 72), wait(lambda: ON_SHELF[0].making == 0 and not ON_SHELF[0].strip, 4000))),
@@ -520,6 +554,13 @@ SHOTS = {
     "mono-masks": (SMALL, photo, lambda root, session: (session.setEdit("mono", True), masked(OVAL)(root, session))),
     "detail": (BIG, photo, lambda root, session: (
         session.setEdits({"sharpen": 60.0, "sharpenMask": 40.0, "denoise": 50.0, "denoiseColor": 60.0}), show(root, "detail"))),
+    "detail-neural": (BIG, photo, lambda root, session: (root.setProperty("neural", True), show(root, "detail"))),
+    "detail-denoised": (BIG, photo, lambda root, session: (
+        setattr(session, "_denoised", True), session.refresh(), show(root, "detail"))),
+    "denoise-working": (BIG, photo, lambda root, session: neural(root, session, "working", 0.42)),
+    "denoise-ready": (BIG, photo, lambda root, session: neural(root, session, "ready")),
+    "denoise-small": (SMALL, photo, lambda root, session: neural(root, session, "ready")),
+    "denoise-failed": (BIG, photo, lambda root, session: neural(root, session, "failed")),
     "lens": (BIG, lambda: ui.Session([Path("test chart.arw")], load=lensed), lambda root, session: (
         session.setEdit("lensColor", False), show(root, "lens"))),
     "lens-none": (SMALL, photo, lambda root, session: show(root, "lens")),
@@ -979,6 +1020,13 @@ def audit_modal(view, root) -> list[str]:
     # The arrows are the question's own: from one button to the other, and not to the photos.
     source = root.property("openPath")
     yes, no = find(root, "confirm-yes"), find(root, "confirm-no")
+    if find(root, "modal:denoise").isVisible():  # (the Neural Denoise window: its own two)
+        yes, no = find(root, "denoise-confirm"), find(root, "denoise-cancel")
+        if not yes.isEnabled():  # (nothing to confirm yet: the keys stay on Cancel)
+            QTest.keyClick(view, Qt.Key.Key_Right)
+            settle()
+            return [] if no.hasActiveFocus() and root.property("openPath") == source else [
+                "with Neural Denoise open and nothing to confirm, the right arrow leaves Cancel or steps to another photo"]
     QTest.keyClick(view, Qt.Key.Key_Right)
     settle()
     if not yes.hasActiveFocus() or root.property("openPath") != source:

@@ -2029,8 +2029,35 @@ Rectangle {
                 EditSlider { key: "sharpenRadius"; name: "Radius"; unit: "px"; from: 0.5; to: 3; neutral: 1; step: 0.1; digits: 1; signed: false }
                 EditSlider { key: "sharpenMask"; name: "Masking"; from: 0; to: 100; step: 1; digits: 0; signed: false }
                 Label { height: 34; verticalAlignment: Text.AlignBottom; bottomPadding: 4; text: "NOISE REDUCTION"; font.pixelSize: Theme.smallSize; font.weight: Font.DemiBold; font.letterSpacing: 0.9; color: Theme.dim }
-                EditSlider { key: "denoise"; name: "Luminance"; from: 0; to: 100; step: 1; digits: 0; signed: false }
-                EditSlider { key: "denoiseColor"; name: "Color"; from: 0; to: 100; step: 1; digits: 0; signed: false }
+                // A file the neural denoiser wrote has no noise left to take out: only that is
+                // said. A raw file has the switch Neural: on, the net does it (in its window,
+                // which writes a new file) and the two sliders, which are the other way, go.
+                Label {
+                    objectName: "detail-denoised"
+                    visible: session.denoised
+                    width: parent.width; height: implicitHeight + 8; verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap; color: Theme.dim
+                    text: "This file is already denoised by Photone's neural denoiser."
+                }
+                OnOff {
+                    objectName: "detail-neural"
+                    visible: session.develops && !session.denoised
+                    label: "Neural"; on: root.neural
+                    onFlipped: { root.neural = !root.neural; session.remember("detail/neural", root.neural ? "1" : "0"); root.forceActiveFocus() }
+                }
+                PushButton {
+                    objectName: "detail-denoise"
+                    visible: session.develops && !session.denoised && root.neural
+                    width: parent.width; label: "Denoise…"
+                    onPressed: root.denoisePhoto(session.path)
+                }
+                EditSlider { visible: !session.denoised && !(session.develops && root.neural); key: "denoise"; name: "Luminance"; from: 0; to: 100; step: 1; digits: 0; signed: false }
+                EditSlider { visible: !session.denoised && !(session.develops && root.neural); key: "denoiseColor"; name: "Color"; from: 0; to: 100; step: 1; digits: 0; signed: false }
+                Label {
+                    objectName: "detail-neural-words"
+                    visible: session.develops && !session.denoised && root.neural
+                    width: parent.width; height: implicitHeight + 10; verticalAlignment: Text.AlignBottom; wrapMode: Text.WordWrap; font.pixelSize: 12; color: Theme.faint
+                    text: "A neural net takes the noise out of the raw data and writes the result as a new raw file beside this one, with this photo's edit."
+                }
                 Label {
                     width: parent.width; height: implicitHeight + 10; verticalAlignment: Text.AlignBottom; wrapMode: Text.WordWrap; font.pixelSize: 12; color: Theme.faint
                     text: "Seen at 100 % and closer. Masking keeps sharpening off what differs too little from its surroundings to be an edge: noise."
@@ -2292,7 +2319,7 @@ Rectangle {
         // A plain click on the photo marks its color on the wheel, to be pinned.
         onTapped: (u, v) => wheel.mark(session.colorAt(u, v))
         onMaskLeft: wheel.mask = 0
-        asking: confirm.visible   // (files dropped while a question is open are not opened)
+        asking: confirm.visible || denoiseWindow.visible   // (files dropped while a question is open are not opened)
         brushSize: Math.max(0.003, Math.min(0.3, Number(session.remembered("brush/size", "0.05")) || 0.05))
         brushFeather: Math.max(0, Math.min(1, Number(session.remembered("brush/feather", "0.5"))))
         mask: wheel.mask
@@ -2746,6 +2773,11 @@ Rectangle {
                 }
                 Entry { objectName: "menu-remove-folder"; visible: menu.folder !== ""; label: "Remove from library…"; onPressed: root.removeFolder(menu.folder) }
                 Entry {
+                    objectName: "menu-denoise"; label: "Neural Denoise…"
+                    visible: menu.folder === "" && menu.photos.length === 1 && menu.visible && denoiser.fits(String(menu.photos[0]))
+                    onPressed: root.denoisePhoto(String(menu.photos[0]))
+                }
+                Entry {
                     objectName: "menu-export"; visible: menu.folder === ""; opacity: exporter.running ? 0.4 : 1
                     label: exporter.running ? "An export is running" : menu.photos.length > 1 ? "Export all (" + menu.photos.length + ")" : "Export"
                     onPressed: root.exportNow(menu.photos)
@@ -2771,6 +2803,26 @@ Rectangle {
                 }
             }
         }
+    }
+
+    // ---- Neural Denoise: its window, over everything but a question -----------------------
+    // The photo is opened in Edit first if it is not the open one (from the library's menu):
+    // the window shows the open photo, and uses its pictures.
+    property bool neural: session.remembered("detail/neural", "0") === "1"   // the Detail card's switch
+    function denoisePhoto(path) {
+        if (!denoiser.fits(path)) return
+        if (path !== session.path || !editing) editPhoto(path)
+        if (session.path === path) denoiseWindow.open()
+    }
+    Denoise {
+        id: denoiseWindow
+        objectName: "denoise-window"
+        z: 9.5
+        stage: stage
+        onClosed: root.forceActiveFocus()
+        // The new file: found by the library where its folder is one of the library's, and
+        // shown straight after its original.
+        onDone: (path) => { library.rescan(); session.openBeside(path) }
     }
 
     // ---- A question that must be answered before anything else ---------------------------

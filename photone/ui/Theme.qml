@@ -81,6 +81,8 @@ QtObject {
         const by = 0.5
         return Qt.rgba(from.r + (hue.r * dim - from.r) * by, from.g + (hue.g * dim - from.g) * by, from.b + (hue.b * dim - from.b) * by, 1)
     }
+    readonly property string sparkSign: "M10 2.5 L12 8 L17.5 10 L12 12 L10 17.5 L8 12 L2.5 10 L8 8 Z"   // "denoised by the net"
+    readonly property string linkSign: "M8.6 11.4 a3 3 0 0 0 4.2 0 l2.5 -2.5 a3 3 0 0 0 -4.2 -4.2 l-1.1 1.1 M11.4 8.6 a3 3 0 0 0 -4.2 0 l-2.5 2.5 a3 3 0 0 0 4.2 4.2 l1.1 -1.1"   // a photo and its denoised copy
     readonly property string resetSign: "M4.9 6.2 A6.4 6.4 0 1 1 3.6 10.4 M4.9 2.2 V6.2 H8.9"   // an arrow turning back
     readonly property string pencilSign: "M4 16 L4.8 12.6 L13.6 3.8 L16.2 6.4 L7.4 15.2 Z M12 5.4 L14.6 8"
     readonly property string binSign: "M4 6 H16 M8 6 V4 H12 V6 M5.5 6 L6.3 16.5 H13.7 L14.5 6 M8.5 9 V13.5 M11.5 9 V13.5"

@@ -91,25 +91,28 @@ rem (All of it stays in the temporary folder: nothing of Python is installed on 
 set "PATH=%WORK%;%PATH%"
 set "UV_CACHE_DIR=%WORK%\uv-cache"
 set "UV_PYTHON_INSTALL_DIR=%WORK%\uv-python"
-set "UV_NO_PROGRESS=1"
 call :done "uv (temporary: removed again at the end)"
 
 rem ---- 4 ------------------------------------------------------------------------------------
 call :step "Building Photone"
-echo         Python, Qt and the raw decoder are downloaded: about 150 MB.
-echo         This takes a few minutes. Nothing is stuck.
-uv run --no-project --python 3.13 python "%TREE%\scripts\build_windows.py" >> "%LOG%" 2>&1
-if errorlevel 1 (set "WHY=The build failed." & goto :failed)
+echo         Python, Qt, the raw decoder and the denoiser's ONNX Runtime are downloaded:
+echo         about 200 MB. This takes a few minutes; each download is shown below.
+echo.
+rem (Not into the log: what the build prints is the progress, and it is on the screen.)
+uv run --no-project --python 3.13 python "%TREE%\scripts\build_windows.py"
+if errorlevel 1 (del /Q "%LOG%" >nul 2>&1 & set "WHY=The build failed: what went wrong is above." & goto :failed)
 if not exist "%TREE%\bin\Photone.exe" (set "WHY=The build made no Photone.exe." & goto :failed)
 call :done "Built"
 
 rem ---- 5 ------------------------------------------------------------------------------------
 call :step "Installing"
+echo         Copying the files ...
 robocopy "%TREE%\bin" "%PHOTONE_DEST%" /MIR /NFL /NDL /NJH /NJS /NP >> "%LOG%" 2>&1
 if errorlevel 8 (set "WHY=The files could not be copied to %PHOTONE_DEST%." & goto :failed)
 copy /Y "%~f0" "%PHOTONE_DEST%\uninstall.bat" >nul 2>&1
 rem Python's compiled files, made now: Program Files cannot be written to later, and without
 rem them every start would compile the program again.
+echo         Compiling the Python files (a minute) ...
 "%PHOTONE_DEST%\python\python.exe" -m compileall -q "%PHOTONE_DEST%\photone" "%PHOTONE_DEST%\lib" >> "%LOG%" 2>&1
 call :done "%PHOTONE_DEST%"
 

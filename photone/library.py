@@ -42,7 +42,7 @@ from PySide6.QtDBus import QDBusConnection, QDBusMessage
 from PySide6.QtGui import QDesktopServices, QImage, QImageReader, QTransform
 from PySide6.QtQuick import QQuickItem
 
-from photone import decode, edit
+from photone import decode, dng, edit
 from photone.catalog import MARKS, Catalog, identify
 
 THUMB = 512  # a thumbnail's longer side, in pixels
@@ -444,6 +444,30 @@ def lasts_in(settings) -> dict[str, str]:
         return {}
 
 
+def paired(photos: list[dict], made) -> list[dict]:
+    """The photos with each denoised copy straight after the photo it was made from, wherever
+    its name or date would have put it (by name it sorts before its original). `made(path)`:
+    what the neural denoiser says of a file (dng.made_here), whose `of` is the catalog's key
+    of the original. A copy whose original is not among them stays where it was.
+    ponytail: every .dng's header is read once a run (well under a millisecond each; kept in
+    `Library.made_here`; a file of another kind is not opened). For a library of many
+    thousands of DNGs the upgrade is a column of the catalog, filled by the scan."""
+    copies: dict = {}
+    for photo in photos:
+        said = made(photo["path"])
+        if said and said.get("of"):
+            copies.setdefault(said["of"], []).append(photo)
+    keys = {photo["key"] for photo in photos}
+    moved = {id(copy) for of, some in copies.items() if of in keys for copy in some}
+    if not moved:
+        return photos
+    out = []
+    for photo in photos:
+        if id(photo) not in moved:
+            out += [photo, *copies.get(photo["key"], [])]
+    return out
+
+
 # ---- what the interface talks to ------------------------------------------------------------
 
 class PhotoModel(QAbstractListModel):
@@ -548,7 +572,8 @@ class Library(QObject):
         # For the filmstrip: thumbnails it wants, which are made also while the library rests,
         # one at a time; and photos it shows that the library does not have, by their paths.
         self.strip: set[str] = set()
-        self.loose: dict[str, dict | None] = {}
+        # (`made_here`: per file, what the neural denoiser says of it: dng.made_here, read once.)
+        self.loose, self.made_here = {}, {}
         self.made.connect(self._made)
         self.kept.connect(self._kept)
         self.scanned.connect(lambda done: self._news(scanning=not done))
@@ -569,7 +594,7 @@ class Library(QObject):
         """Read the photos from the catalog again and show those the place and filter let by."""
         if scanning is not None:
             self._busy = scanning
-        self.all = self.catalog.photos() if self.catalog else []
+        self.all = paired(self.catalog.photos() if self.catalog else [], self._said)
         for photo in self.all:
             photo["thumb"] = thumb_name(photo["key"])
         self._show()
@@ -1039,6 +1064,28 @@ class Library(QObject):
         at = self.model.pathed.get(path)
         return {} if at is None else {what: self.model.rows[at][what]
                                       for what in (*MARKS, "edited")}
+
+    def _said(self, path: str) -> dict | None:
+        """What the neural denoiser says of that file (dng.made_here), read once."""
+        if path not in self.made_here:
+            self.made_here[path] = dng.made_here(Path(path))
+        return self.made_here[path]
+
+    @Slot(str, result=bool)
+    def denoised(self, path: str) -> bool:
+        """That file is one Photone's neural denoiser wrote (the spark on its thumbnail)."""
+        return bool(path) and self._said(path) is not None
+
+    @Slot(str, str, result=bool)
+    def copyOf(self, path: str, of: str) -> bool:  # noqa: N802
+        """`path` is the denoised copy of the photo at `of`: the two are shown as a pair
+        where they stand next to each other. By what the copy carries (the original's key in
+        the catalog), not by their names."""
+        if not (of and self.denoised(path)):
+            return False
+        at = self.model.pathed.get(of)
+        original = self.model.rows[at] if at is not None else self._loose(of)
+        return bool(original) and self._said(path).get("of") == original["key"]
 
     @Slot(result="QVariantList")
     def paths(self) -> list:

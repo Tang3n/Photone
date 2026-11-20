@@ -30,7 +30,7 @@ from PySide6.QtCore import QCoreApplication, QSettings, Qt, QUrl  # noqa: E402
 from PySide6.QtGui import QColor, QImage  # noqa: E402
 from PySide6.QtQml import QQmlComponent, QQmlEngine  # noqa: E402
 
-from photone import app, catalog, decode, edit, export, library, scopes, shaders  # noqa: E402
+from photone import app, catalog, decode, denoise, dng, edit, export, library, scopes, shaders  # noqa: E402
 
 
 def check_store() -> None:
@@ -2505,6 +2505,147 @@ def check_kept() -> None:
     assert (span(rows), span(columns)) == ((0, 5208), (0, 3476)), "no part named: all of it"
 
 
+def check_denoise() -> None:
+    """The neural denoiser around its net: the shares mixed back, the DNG written and read as
+    Photone shows a raw file, known as ours (never denoised twice), and no arithmetic noise
+    reduction on it. (The net itself runs on a real file: PHOTONE_SAMPLE.)"""
+    cam_xyz = [[0.746, -0.2365, -0.0588], [-0.5687, 1.3442, 0.2474], [-0.0624, 0.1156, 0.6584]]
+    about = {"wb": [2.4, 1.0, 1.6], "cam_xyz": cam_xyz, "a": 2.0, "b": 30.0, "room": 15868.0,
+             "light": [0.05, 0.4], "lens": {"distortion": [1, 2, 3]}, "turned": 8, "preview": None,
+             "header": {0x10f: "SONY", 0x110: "ILCE-7M4", 0x8827: 6400, 0x829a: 0.004, 0x9204: -1.3,
+                        0x9003: "2026:07:10 21:53:15", 0xa434: "A lens"}}
+    rng = np.random.default_rng(3)
+    # (Grays with a little color: a color no camera records has no place in the net's terms.)
+    noisy = (rng.random((30, 44, 1)) * 30000 + 2000 + rng.random((30, 44, 3)) * 1500).astype(np.uint16)
+    held = denoise.Denoised(noisy, about)
+    whole = slice(0, 30)
+    v = held.into(noisy)
+    assert np.allclose(held.camera(v) @ held.from_cam.T, noisy / 65535, atol=2e-5), "into the net's terms and back"
+    held.clean[...] = v + rng.standard_normal(v.shape).astype(np.float32)  # (what a net might take: anything)
+    assert np.allclose(held.mixed(whole, 0, 0), held.camera(v), atol=1e-5), "nothing kept away: the photo as it was"
+    assert np.allclose(held.mixed(whole, 1, 1), held.camera(held.clean), atol=1e-5), "all kept away: the net's result"
+    took = v - held.clean
+    grain_back = held.clean + took.mean(2, keepdims=True)  # color noise away, the grain back
+    assert np.allclose(held.mixed(whole, 1, 0), held.camera(grain_back), atol=1e-5), "Grain is what the colors have in common"
+    assert np.allclose(held.picture()[..., :3], np.clip(held.camera(held.clean) @ held.from_cam.T, 0, 1), atol=2e-3)
+    with tempfile.TemporaryDirectory() as folder:
+        raw = Path(folder) / "shot.ARW"
+        raw.write_bytes(b"II*\0" + b"\0" * 64)
+        assert denoise.target(raw).name == "shot-Denoised.dng"
+        out = denoise.save(held, raw, 0.7, 0.4)
+        assert out.name == "shot-Denoised.dng" and denoise.target(raw).name == "shot-Denoised-2.dng", "never written over"
+        assert not list(Path(folder).glob("*.part"))
+        made = dng.made_here(out)
+        assert made == {"model": denoise.MODEL.stem, "color": 0.7, "grain": 0.4, "from": "shot.ARW",
+                        "of": catalog.identify(raw)}, made
+        assert made["of"].startswith("c1:") and made["of"] != catalog.identify(out), "the original's fingerprint, not its own"
+        assert dng.made_here(raw) is None and dng.made_here(Path(folder) / "none.dng") is None
+        info, pixels = decode.load(out, half=False)
+        # (Lying on its side in the file, as the sensor had it: upright again when read.)
+        assert (info["width"], info["height"], info["full"]) == (44, 30, [44, 30]), info
+        assert info["raw"] and info["denoised"] and info["light"] == about["light"], info
+        assert info["camera"] == {"wb": about["wb"], "cam_xyz": cam_xyz, "lens": about["lens"], "denoised": True}
+        seen = np.frombuffer(pixels.buf, np.float16).reshape(30, 44, 4)
+        want = np.clip(held.mixed(whole, 0.7, 0.4) @ held.from_cam.T, 0, 1)
+        assert np.allclose(seen[..., :3], want, atol=2e-3) and (seen[..., 3] == 1).all(), "what was written is what is shown"
+        half, _ = decode.load(out, half=True)
+        assert (half["width"], half["height"], half["full"], half["size"]) == (22, 15, [44, 30], "half"), half
+        said = library.describe(out)
+        assert said["camera"] == "SONY ILCE-7M4" and said["turned"] == 8 and said["bias"] == -1.3, said
+        assert library.about(out)["iso"] == "ISO 6400" and library.about(out)["shutter"] == "1/250 s", library.about(out)
+        for wrong in (lambda: denoise.develop(out), lambda: denoise.develop(Path(folder) / "a.jpg")):
+            try:
+                wrong()
+                raise AssertionError("denoised what must not be")
+            except ValueError as e:
+                assert "already denoised" in str(e) or "Only raw files" in str(e), e
+        # What the window does once the file is written: the original's edit is the new file's
+        # too, and the new file stands after its original among the open photos.
+        kept = catalog.Catalog(Path(folder) / "catalog.db")
+        kept.save(catalog.identify(raw), raw, {"contrast": 20.0, "denoise": 40.0})
+        session = app.Session([raw, Path(folder) / "next.ARW"], load=lambda path, half: decode.synthetic(), catalog=kept)
+        window, told = denoise.Denoiser(session), []
+        window.saved.connect(told.append)
+        assert window.fits(str(raw)) and not window.fits(str(out)) and not window.fits("a.jpg"), "only a raw file not yet denoised"
+        window._path = raw
+        window._written(out)
+        assert kept.load(catalog.identify(out), out) == kept.load(catalog.identify(raw), raw) != {}, "the edit is copied"
+        assert told == [str(out)] and window.state == "" and window.held is None
+        session.openBeside(str(out))
+        assert [p.name for p in session.photos] == ["shot.ARW", "shot-Denoised.dng", "next.ARW"] and session.path == str(out)
+        session.flush()
+        # In the library's order a copy stands straight after its original, by what it carries.
+        rows = [{"key": "k-copy", "path": str(out)}, {"key": "k-other", "path": "b.ARW"},
+                {"key": catalog.identify(raw), "path": str(raw)}, {"key": "k-last", "path": "z.dng"}]
+        order = [r["key"] for r in library.paired(rows, lambda path: dng.made_here(Path(path)))]
+        assert order == ["k-other", catalog.identify(raw), "k-copy", "k-last"], order
+        assert library.paired(rows[:2], lambda path: dng.made_here(Path(path))) == rows[:2], "no original among them: as it was"
+        # Packed and unpacked, a strip is what it was, to a half float (also past one strip's rows).
+        tall = rng.random((dng.STRIP + 9, 7, 3)).astype(np.float32) * 1.2 - 0.1
+        assert (dng._unpack(dng._pack(tall), len(tall), 7) == tall.astype(np.float16)).all()
+        cut = Path(folder) / "cut.dng"
+        cut.write_bytes(out.read_bytes()[:-100])
+        try:
+            decode.load(cut)
+            raise AssertionError("a file cut short was shown")
+        except decode.Unreadable as e:
+            assert "unpack" in str(e) or "cut short" in str(e), e
+    numbers = edit.uniforms({"denoise": 50.0, "denoiseColor": 50.0, "sharpen": 40.0}, info["camera"], True, wide=44)
+    assert numbers["denoise"] == numbers["denoiseColor"] == numbers["denoiseFar"] == 0 and numbers["sharpen"] > 0, "no noise reduction on a denoised file"
+    assert edit.uniforms({"denoise": 50.0}, {**info["camera"], "denoised": False}, True, wide=44)["denoise"] > 0
+    assert denoise.known((4688, 7028), 12800) == (12800 * 0.002175, 1114.4) and denoise.known((10, 10), 100) is None
+    a, b = denoise.of_mosaic(rng.normal(500, 10, (640, 960)))  # (flat, noise of 10: all of it is b)
+    assert 60 < a * 500 + b < 160, (a, b)
+    assert denoise.MODEL.exists() and denoise.MODEL.stat().st_size > 1 << 20, "the net comes with the program"
+
+
+def check_denoise_refused() -> None:
+    """The net on a card that refuses a piece now and then (its memory full for a moment)."""
+    # A piece the GPU refuses is done on the processor, and the next is tried on the GPU again;
+    # three refusals in a row and the GPU is left alone.
+    class Card:
+        def __init__(self, refuses): self.refuses, self.asked = set(refuses), 0
+        def run(self, _, feed):
+            self.asked += 1
+            if self.asked in self.refuses:
+                raise RuntimeError("Failed to allocate memory")
+            return [feed["x"] + 1]
+    net = denoise._Net.__new__(denoise._Net)
+    net.fast, net.on, net.slow = Card({2}), "CUDA", Card(())
+    net.refused, net.pieces, net.slowly, net.why = 0, 0, 0, ""
+    for _ in range(4):
+        assert (net(np.zeros(2), None) == 1).all()
+    assert (net.fast.asked, net.slow.asked) == (4, 1) and net.where == "CUDA, and the processor for 1 of 4 pieces", net.where
+    net.fast, net.refused, net.pieces, net.slowly = Card({1, 2, 3, 4, 5}), 0, 0, 0
+    for _ in range(6):
+        net(np.zeros(2), None)
+    assert net.fast.asked == 3 and net.where == "the processor", (net.fast.asked, net.where)
+
+
+def check_denoise_sample(path: Path) -> None:
+    """A real raw file through the net (on the GPU where there is one), written and read back."""
+    with tempfile.TemporaryDirectory() as folder:
+        copy = Path(shutil.copy(path, folder))
+        steps = []
+        held = denoise.run(copy, lambda done, of, on: steps.append((done, of)))
+        assert steps[0][0] == 0 and steps[-1][0] == steps[-1][1] == len(steps) - 1, steps
+        out = denoise.save(held, copy)
+        was, _ = decode.load(copy, half=False)
+        now, pixels = decode.load(out, half=False)
+        assert (now["width"], now["height"], now["light"]) == (was["width"], was["height"], was["light"])
+        seen = np.frombuffer(pixels.buf, np.float16).reshape(now["height"], now["width"], 4)[::4, ::4, :3].astype(np.float32)
+        before = held.noisy[::4, ::4] / 65535
+        rough = lambda p: float(np.abs(p[:, 2:] - 2 * p[:, 1:-1] + p[:, :-2]).mean())  # noqa: E731
+        assert rough(seen) < rough(before), "calmer than it was"
+        # As light where there is light. (Not near black: there the sensor's noise, cut off at
+        # black by the decoder, made the photo lighter than the scene, and that goes with it:
+        # a photo at ISO 12800 came out at 0.55 of its darkest tenth and 0.99 of its lightest.)
+        blocks = lambda p: p[:p.shape[0] // 8 * 8, :p.shape[1] // 8 * 8, 1].reshape(p.shape[0] // 8, 8, p.shape[1] // 8, 8).mean((1, 3)).ravel()  # noqa: E731
+        light = blocks(before) >= np.percentile(blocks(before), 90)
+        assert abs(blocks(seen)[light].mean() / blocks(before)[light].mean() - 1) < 0.05, "and as light"
+        print(f"  denoised on {held.where}: {len(steps) - 1} pieces, {out.stat().st_size / 2**20:.0f} MB")
+
+
 def check_sample(path: Path) -> None:
     meta, pixels = decode.load(path)
     px = np.frombuffer(pixels.buf, np.float16).reshape(meta["height"], meta["width"], 4)
@@ -2595,12 +2736,15 @@ def main() -> None:
     check_headroom()
     check_raster()
     check_kept()
+    check_denoise()
+    check_denoise_refused()
     check_workers()
     check_no_orphan()
     check_surface_choice()
     check_shaders()
     if sample := os.environ.get("PHOTONE_SAMPLE"):
         check_sample(Path(sample))
+        check_denoise_sample(Path(sample))
     print("ok")
 
 

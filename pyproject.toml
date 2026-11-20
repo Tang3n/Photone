@@ -9,6 +9,11 @@ dependencies = [
     "PySide6>=6.8",   # Qt Quick: the window, the interface, and the GPU surface (SDR or HDR)
     "rawpy>=0.24",    # LibRaw, bundled in the wheel: decodes camera raw files
     "numpy>=2.0",     # the pixel arrays rawpy returns, packed for the GPU
+    # ONNX Runtime runs the neural denoiser's net (photone/denoise.py). On Linux its CUDA
+    # build with NVIDIA's libraries as wheels (some 2 GB; any other card there: the processor);
+    # on Windows its DirectML build, which runs on any maker's card.
+    "onnxruntime-gpu[cuda,cudnn]>=1.22; sys_platform == 'linux'",
+    "onnxruntime-directml>=1.22; sys_platform == 'win32'",
 ]
 
 [project.scripts]

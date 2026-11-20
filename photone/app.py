@@ -60,6 +60,7 @@ from PySide6.QtQuick import QQuickImageProvider, QQuickItem, QQuickView
 
 from photone import HOMEPAGE, QUIET, __version__, decode, edit, lut, scopes, shaders
 from photone.catalog import Catalog, identify
+from photone.denoise import Denoiser
 from photone.export import Exporter
 from photone.library import Library, about
 from photone.presets import Presets
@@ -173,6 +174,8 @@ class Session(QObject):
     LISTS = ("pins", "curve", "chroma", "eq", "bw", "grainCurve", "luts", "masks")
     photoChanged = Signal()  # another photo is shown: its view starts afresh
     described = Signal(int, object)  # from a loader thread: (generation, the photo's description)
+    denoiser = None     # the neural denoiser (make_view gives the session one)
+    _denoised = False   # the open photo is a file the neural denoiser wrote
 
     def __init__(self, photos: list[Path], load=decode.load, hdr: bool | None = None,
                  settings: QSettings | None = None, catalog: Catalog | None = None) -> None:
@@ -877,6 +880,7 @@ class Session(QObject):
         self._index, self._failed = index, False
         self._panels = {**self._panels, "chart": False}
         self._camera, self._raw, self._small, self._histogram = None, False, None, {}
+        self._denoised = False
         self._lab, self._after, self._range = None, None, ("full", 0.0, 1.0)
         self._inside = None
         self._redot()
@@ -984,7 +988,7 @@ class Session(QObject):
         generation, index, size = address.split("/")
         blank = QImage(*self.BLANK, QImage.Format.Format_RGBA16FPx4)
         blank.fill(0)
-        if generation in ("painted", "lut", "export", "mark"):
+        if generation in ("painted", "lut", "export", "mark", "denoised"):
             return self._other(generation, index, size) or blank
         if int(generation) != self._generation:
             return blank  # a photo the user has already left: not worth decoding
@@ -1008,6 +1012,9 @@ class Session(QObject):
         watermark, or the photo an export is being made of (photone/export.py)."""
         if kind == "mark":
             return self.exporter.mark_picture() if self.exporter else None
+        if kind == "denoised":  # the neural denoiser's result, for its window's preview
+            seen = self.denoiser.pixels if self.denoiser else None
+            return None if seen is None else owned(seen, seen.shape[1], seen.shape[0])
         if kind == "painted":
             return self._painted_at(which)
         if kind == "lut":
@@ -1047,7 +1054,7 @@ class Session(QObject):
         self._info = f"{meta['name']}  ·  {self._size[0]} × {self._size[1]}"
         camera = meta["camera"] or edit.FINISHED  # no camera behind it: white moves all the same
         self._camera = {**camera, "shot": edit.as_shot(camera), "light": meta.get("light")}
-        self._raw = meta["raw"]
+        self._raw, self._denoised = meta["raw"], bool(meta.get("denoised"))
         self.refresh()
 
     # ---- the edit (photone/edit.py) -------------------------------------------------------
@@ -1070,6 +1077,22 @@ class Session(QObject):
         stored = self.catalog.load(self._key, photo)
         self.points = self.catalog.checkpoints(self._key)
         return stored
+
+    @Property(bool, notify=changed)
+    def denoised(self) -> bool:
+        """The photo is a file Photone's neural denoiser wrote: it has no noise reduction."""
+        return self._denoised
+
+    @Slot(str)
+    def openBeside(self, path: str) -> None:  # noqa: N802
+        """Show that file as the photo after the open one in the row (a denoised copy, just
+        written, beside its original)."""
+        if not self.photos:
+            return self.open([path])
+        self.flush()
+        self.photos = [*self.photos[:self._index + 1], Path(path), *self.photos[self._index + 1:]]
+        self._relisted()
+        self._show(self._index + 1)
 
     @Property(bool, notify=changed)
     def develops(self) -> bool:
@@ -1946,6 +1969,7 @@ def make_view(session: Session, library: Library | None = None,
     view.resize(1600, 1000)
     library = library or Library(None)  # (none: an empty one, as in most checks)
     session.exporter = Exporter(session, view)
+    session.denoiser = Denoiser(session)
     view.engine().addImageProvider("photo", PhotoProvider(session))
     presets = presets or Presets()  # (none: kept nowhere, as in the checks)
     context = view.rootContext()
@@ -1954,7 +1978,8 @@ def make_view(session: Session, library: Library | None = None,
     # (The first three are the view's own from here: they outlive the interface that reads
     # them, also at exit.)
     for name, thing in (("session", session), ("library", library), ("presets", presets),
-                        ("exporter", session.exporter), ("cursors", TurnCursors(view)),
+                        ("exporter", session.exporter), ("denoiser", session.denoiser),
+                        ("cursors", TurnCursors(view)),
                         ("usage", Usage(view))):
         thing.setParent(view)
         context.setContextProperty(name, thing)
@@ -1965,7 +1990,8 @@ def make_view(session: Session, library: Library | None = None,
                        ("tallyShader", "tally.frag"), ("tallyVertex", "tally.vert"),
                        ("barsShader", "bars.frag"), ("barsVertex", "bars.vert"),
                        ("brushShader", "brush.frag"), ("brushVertex", "brush.vert"),
-                       ("brushedShader", "brushed.frag"), ("brushedVertex", "brushed.vert")):
+                       ("brushedShader", "brushed.frag"), ("brushedVertex", "brushed.vert"),
+                       ("mixingShader", "mixing.frag"), ("mixingVertex", "mixing.vert")):
         url = QUrl.fromLocalFile(str(shaders.compiled(file)))
         context.setContextProperty(name, url.toString())
     view.setSource(QUrl.fromLocalFile(str(UI / "Main.qml")))
