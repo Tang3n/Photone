@@ -94,6 +94,7 @@ def show(ui, session, library, presets=None):
         view = ui.make_view(session, library, presets)
     except RuntimeError as e:
         sys.exit(f"photone: {e}")
+    library.attend(session)  # (a photo whose file is gone is shown as missing in the filmstrip)
     ui.watch_surface(view, session)
     view.show()
     ui.ask_desktop_for_headroom(session, view.screen().name())

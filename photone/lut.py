@@ -53,8 +53,13 @@ def _cube(text: str) -> np.ndarray:
     size = _size(head)
     if len(rows) != size ** 3 or any(len(row) != 3 for row in rows):
         raise ValueError(f"{len(rows)} colors where {size ** 3} are needed")
+    return _colors(rows, size)
+
+
+def _colors(words: list, size: int) -> np.ndarray:
+    """The numbers of a table (as words) as its colors, size points a side, or ValueError."""
     try:
-        table = np.array(rows, dtype=np.float32).reshape(size, size, size, 3)
+        table = np.array(words, dtype=np.float32).reshape(size, size, size, 3)
     except ValueError as e:
         raise ValueError("it holds something that is no number") from e
     if not np.isfinite(table).all():

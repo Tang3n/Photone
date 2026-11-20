@@ -11,7 +11,8 @@ Item {
     // There is a picture of the current photo to draw. Not "the Image is Ready": while the full
     // size is being fetched the half-size picture stays on screen, and it must stay visible.
     property bool have: false
-    readonly property bool ready: have && !session.failed && session.fullWidth > 0
+    property bool missing: false   // the photo's file is gone: nothing of it is shown, though a picture of it may still be held
+    readonly property bool ready: have && !session.failed && !missing && session.fullWidth > 0
     Connections { target: pixels; function onStatusChanged() { if (pixels.status === Image.Ready) view.have = true } }
     Connections { target: session; function onPhotoChanged() { view.have = false } }
 
@@ -189,7 +190,7 @@ Item {
     Image {
         id: standing
         objectName: "stand-in"
-        visible: !view.ready && !session.failed && view.standIn !== ""
+        visible: !view.ready && !session.failed && !view.missing && view.standIn !== ""
         readonly property bool placed: !view.fitted && view.longest > 0 && implicitWidth > 0
         readonly property real by: placed ? view.longest * view.zoom / Math.max(implicitWidth, implicitHeight) : 1
         x: placed ? Math.round(view.width / 2 - view.center.x * width) : view.margin

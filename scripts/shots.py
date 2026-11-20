@@ -212,6 +212,13 @@ def pair(n: int) -> None:
     shown.made_here[shown.paths()[n + 1]] = {"of": shown.model.rows[n]["key"]}
 
 
+def lose(*rows: int) -> None:
+    """The shelf's photos at these rows pass for ones whose files are gone."""
+    shown = ON_SHELF[0]
+    shown.absent = {shown.paths()[row] for row in rows}
+    shown.changed.emit()
+
+
 def stage(root):
     return root.findChild(QObject, "box:stage")
 
@@ -542,6 +549,18 @@ SHOTS = {
     "strip-pair-usual": (BIG, empty, lambda root, session: (
         pair(3), pair(8), session.openAt(ON_SHELF[0].paths(), 3), call(root, "show", "edit"), wait(lambda: root.property("photoReady")),
         wait(lambda: ON_SHELF[0].making == 0 and not ON_SHELF[0].strip, 4000))),
+    # Photos whose files are gone: a plain one, a denoised copy beside its original, and (in
+    # the second) the open one, which can only be taken out; then the question before one goes.
+    "strip-missing": (BIG, empty, lambda root, session: (
+        pair(3), session.openAt(ON_SHELF[0].paths(), 2), call(root, "show", "edit"), wait(lambda: root.property("photoReady")),
+        lose(1, 4, 7), wait(lambda: ON_SHELF[0].making == 0 and not ON_SHELF[0].strip, 4000))),
+    "strip-missing-open": (BIG, empty, lambda root, session: (
+        session.openAt(ON_SHELF[0].paths(), 2), call(root, "show", "edit"), wait(lambda: root.property("photoReady")),
+        wait(lambda: ON_SHELF[0].making == 0 and not ON_SHELF[0].strip, 4000), lose(2, 7))),
+    "strip-missing-ask": (BIG, empty, lambda root, session: (
+        session.openAt(ON_SHELF[0].paths(), 2), call(root, "show", "edit"), wait(lambda: root.property("photoReady")),
+        wait(lambda: ON_SHELF[0].making == 0 and not ON_SHELF[0].strip, 4000), lose(1, 7),
+        call(root, "removeMissing", [ON_SHELF[0].paths()[1]]))),
     "strip-small": (SMALL, empty, lambda root, session: (
         session.openAt(ON_SHELF[0].paths(), 9), call(root, "show", "edit"), wait(lambda: root.property("photoReady")),
         root.setProperty("stripHigh", 72), wait(lambda: ON_SHELF[0].making == 0 and not ON_SHELF[0].strip, 4000))),
@@ -706,7 +725,7 @@ def audit_sliders(root) -> list[str]:
 
 def audit_photo(view, root, session) -> list[str]:
     """Look at the picture itself: is the photo there?"""
-    if not session.photos or root.property("photoFailed") or root.property("place") != "edit":
+    if not session.photos or root.property("photoFailed") or root.property("photoMissing") or root.property("place") != "edit":
         return []
     if not root.property("photoReady"):
         return ["the photo never arrived"]

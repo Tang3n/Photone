@@ -834,8 +834,8 @@ def tone_at(x, u: dict):
     # there turned the blacks milky and brought their noise up. Down, it does not.)
     dark = (1 - _step(-4.5, 0.5, stops)) * (_step(-8.0, -3.0, stops) if u["shadows"] > 0 else 1.0)
     # (Contrast down counts the stops from mid gray less and less toward the two ends, none
-    # at eight stops under and four and a half above: counted in full, black was lifted three
-    # stops and white taken down one and a half, a milky gray picture. Up, it does not.)
+    # eight stops under and none at white: counted in full, black was lifted three stops and
+    # white taken down one and a half, a milky gray picture.)
     # (Up, it counts them less and less too, none at white and none eight stops under: both
     # ends stay where they are and what lies between is steeper, half as steep again round
     # mid gray at +100. Counted in full it showed all from a stop and a half above mid gray

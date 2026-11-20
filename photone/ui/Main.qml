@@ -50,6 +50,9 @@ Rectangle {
     onAwayChanged: library.rest(away)
     readonly property bool photoReady: stage.ready
     readonly property bool photoFailed: session.failed
+    // The open photo's file is gone from the disk: it can only be taken out (the owner:
+    // "when i select it to view it, i only have an option to remove it").
+    readonly property bool photoMissing: (library.busy, session.listing, library.missing(session.path))
 
     // Keys reach here from wherever the focus is, unless a control used them itself.
     focus: true
@@ -1561,7 +1564,7 @@ Rectangle {
                             Label {
                                 x: 10; anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideMiddle
                                 width: parent.width - x - shelfTail.width - 16
-                                text: shelfRow.modelData.name; color: overShelf.containsMouse ? Theme.text : Theme.dim
+                                text: shelfRow.modelData.name; color: Theme.text
                             }
                             Row {
                                 id: shelfTail
@@ -2300,6 +2303,7 @@ Rectangle {
         id: stage
         objectName: "box:stage"
         visible: root.editing
+        missing: root.photoMissing
         anchors { left: leftPane.visible ? leftPane.right : parent.left; right: tools.left; top: chartBar.visible ? chartBar.bottom : topBar.bottom; bottom: filmstrip.visible ? filmstrip.top : foot.top }
         onPicked: (u, v) => { session.pickRange(u, v); picking = "" }
         // Pick neutral: while the button is held and slid, the spot under the pointer is made
@@ -2433,10 +2437,12 @@ Rectangle {
     Scopes { objectName: "scopes"; z: 5; mask: wheel.mask; source: stage.picture; painted: stage.painted; lut: stage.lut; ready: stage.ready }   // (shots show it for a moment)
     Column {
         anchors.centerIn: stage; spacing: 10
-        visible: (session.source === "" || root.photoFailed) && root.editing
-        Label { text: root.photoFailed ? "This photo could not be opened" : "No photo open"; color: Theme.text; font.pixelSize: 15; anchors.horizontalCenter: parent.horizontalCenter }
-        Label { text: "Drop a photo here, or"; anchors.horizontalCenter: parent.horizontalCenter }
-        PushButton { label: "Open…"; anchors.horizontalCenter: parent.horizontalCenter; onPressed: opener.open() }
+        objectName: "no-photo"
+        visible: (session.source === "" || root.photoFailed || root.photoMissing) && root.editing
+        Label { text: root.photoMissing ? "This photo’s file is missing" : root.photoFailed ? "This photo could not be opened" : "No photo open"; color: Theme.text; font.pixelSize: 15; anchors.horizontalCenter: parent.horizontalCenter }
+        Label { text: root.photoMissing ? session.name + " is no longer on the disk." : "Drop a photo here, or"; anchors.horizontalCenter: parent.horizontalCenter }
+        PushButton { visible: !root.photoMissing; label: "Open…"; anchors.horizontalCenter: parent.horizontalCenter; onPressed: opener.open() }
+        PushButton { objectName: "remove-missing"; visible: root.photoMissing; label: "Remove…"; anchors.horizontalCenter: parent.horizontalCenter; onPressed: root.removeMissing([session.path]) }
     }
     // Fit, 100 %, and what the zoom is now.
     Item {
@@ -2555,6 +2561,15 @@ Rectangle {
         const last = session.remembered("library/added", "")
         if (last !== "") folderPicker.currentFolder = last
         folderPicker.open()
+    }
+    // A photo whose file is gone is taken out when the owner says so, and asked first (the
+    // owner: "with a confirm dialog").
+    function removeMissing(paths) {
+        const one = paths.length === 1
+        confirm.ask(one ? "Remove “" + paths[0].split(/[\\/]/).pop() + "”?" : "Remove " + paths.length + " missing photos?",
+                    (one ? "Its file is" : "Their files are") + " no longer on the disk. " + (one ? "Its edit and marks" : "Their edits and marks")
+                    + " are kept, and are there again should the file" + (one ? "" : "s") + " come back.",
+                    "Remove", () => library.remove(paths))
     }
     // Taking a folder out of the library asks first (the owner: it "needs a confirmation").
     function removeFolder(folder) {
@@ -2717,6 +2732,10 @@ Rectangle {
         visible: false
         property var photos: []
         property string folder: ""   // set: the menu is a folder's, not photos'
+        // Those of its photos whose files are gone: they can be taken out, and with nothing
+        // but such photos that is all there is to do.
+        readonly property var lost: (library.busy, photos.filter(path => library.missing(path)))   // (not only while it is open: an entry acts once it has closed)
+        readonly property bool here: folder !== "" || lost.length < photos.length
         function openFolder(path, x, y) { folder = path; photos = []; place(x, y) }
         function open(paths, x, y) {
             if (!paths.length) return
@@ -2763,31 +2782,36 @@ Rectangle {
                 // (The owner: "right-click a folder entry in both the Library AND the card on
                 // the Edit page ... a `Show in explorer` option". Offered for a photo too.)
                 Entry {
-                    objectName: "menu-reveal"; label: "Show in file manager"
+                    objectName: "menu-remove-missing"; visible: menu.lost.length > 0
+                    label: menu.lost.length > 1 ? "Remove missing (" + menu.lost.length + ")…" : "Remove missing photo…"
+                    onPressed: root.removeMissing(menu.lost)
+                }
+                Entry {
+                    objectName: "menu-reveal"; label: "Show in file manager"; visible: menu.here
                     onPressed: library.reveal(menu.folder !== "" ? menu.folder : String(menu.photos[0]))
                 }
                 Entry { objectName: "menu-remove-folder"; visible: menu.folder !== ""; label: "Remove from library…"; onPressed: root.removeFolder(menu.folder) }
                 Entry {
                     objectName: "menu-denoise"; label: "Neural Denoise…"
-                    visible: menu.folder === "" && menu.photos.length === 1 && menu.visible && denoiser.fits(String(menu.photos[0]))
+                    visible: menu.folder === "" && menu.photos.length === 1 && menu.visible && menu.here && denoiser.fits(String(menu.photos[0]))
                     onPressed: root.denoisePhoto(String(menu.photos[0]))
                 }
                 Entry {
-                    objectName: "menu-export"; visible: menu.folder === ""; opacity: exporter.running ? 0.4 : 1
+                    objectName: "menu-export"; visible: menu.folder === "" && menu.here; opacity: exporter.running ? 0.4 : 1
                     label: exporter.running ? "An export is running" : menu.photos.length > 1 ? "Export all (" + menu.photos.length + ")" : "Export"
                     onPressed: root.exportNow(menu.photos)
                 }
                 Entry {
-                    objectName: "menu-copy-look"; label: "Copy look"; visible: menu.folder === "" && menu.photos.length === 1
+                    objectName: "menu-copy-look"; label: "Copy look"; visible: menu.folder === "" && menu.photos.length === 1 && menu.here
                     onPressed: root.copyLook(String(menu.photos[0]))
                 }
                 Entry {
-                    objectName: "menu-paste-look"; visible: menu.folder === "" && library.hasLook
+                    objectName: "menu-paste-look"; visible: menu.folder === "" && library.hasLook && menu.here
                     label: menu.photos.length > 1 ? "Paste look on all (" + menu.photos.length + ")" : "Paste look"
                     onPressed: root.pasteLook(menu.photos)
                 }
                 Entry {
-                    objectName: "menu-reset"; label: "Reset edits…"; visible: menu.folder === ""
+                    objectName: "menu-reset"; label: "Reset edits…"; visible: menu.folder === "" && menu.here
                     onPressed: {
                         const these = menu.photos, one = these.length === 1
                         confirm.ask(one ? "Reset the edits of “" + these[0].split("/").pop() + "”?" : "Reset the edits of " + these.length + " photos?",

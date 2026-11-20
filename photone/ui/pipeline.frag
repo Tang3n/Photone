@@ -250,7 +250,7 @@ vec3 develop(vec3 c) {
     // there turned the blacks milky and brought their noise up. Down, it does not.)
     float deep = shadows > 0.0 ? smoothstep(-8.0, -3.0, stops) : 1.0;
     // (Contrast down counts the stops from mid gray less and less toward the two ends, none
-    // at eight stops under and four and a half above: counted in full, black was lifted three
+    // at eight stops under and none at white: counted in full, black was lifted three
     // stops and white taken down one and a half, a milky gray picture. Up, none at white and
     // none eight stops under: both ends stay where they are and what lies between is steeper.
     // Counted in full, it showed all from a stop and a half above mid gray as white.)

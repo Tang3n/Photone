@@ -923,7 +923,7 @@ def check_tone_even() -> None:
     def flat(stops: float) -> float:
         plain, moved = (edit.uniforms({"exposure": 0.0, **v}, None, True) for v in ({}, {"contrast": -100.0}))
         return float(np.log2(edit.tone_at(edit.MID * 2 ** stops, {**moved, "curveC": 0.0}) / edit.tone_at(edit.MID * 2 ** stops, {**plain, "curveC": 0.0})))
-    assert abs(flat(-1) - 0.5) < 1e-9 and abs(flat(-8)) < 1e-9 and -0.5 < flat(3) < 0 and abs(flat(0.5) + 0.25) < 1e-9
+    assert abs(flat(-1) - 0.35) < 1e-9 and abs(flat(0.5) + 0.175) < 1e-9 and abs(flat(-8)) < 1e-9 and abs(flat(3)) < 1e-9
     # Contrast up steepens the middle by half and leaves the two ends: black and the sensor's
     # white where they were, nothing between them flat (over half of the contrast at the least, deep in the shadows).
     def steep(stops: float) -> float:
@@ -2267,6 +2267,47 @@ def check_unsaved() -> None:
     assert edit.unsaved([one, two], {"exposure": 0.5, "contrast": 25.0}, None) == ["contrast"]  # newest
 
 
+def check_folders_fast() -> None:
+    """Gone through quickly, the folders leave nothing behind: the photo of one that was left
+    before its decoding began is not decoded (each was, and the one stopped at waited behind
+    them all), an edit not yet written goes to its own photo, and the open photo is one of
+    the new ones before anybody is told of them."""
+    gate, begun = threading.Event(), []
+
+    def slow(path: Path, half: bool):
+        begun.append(path.name)
+        gate.wait(10)
+        return chart(path, half)
+
+    saved = []
+    keeper = type("Keeper", (), {"save": lambda self, key, photo, values, points=(): saved.append(photo.name),
+                                 "save_steps": lambda self, key, *kept: None, "load": lambda self, key, photo: {},
+                                 "checkpoints": lambda self, key: [], "steps": lambda self, key: None})()
+    session = app.Session([Path(f"/a/{n}.jpg") for n in range(9)], load=slow)
+    session.goTo(8)
+    session._unwritten, session.catalog, paths = True, keeper, []
+    session.listed.connect(lambda: paths.append(session.path))  # (raised, out of the open photo's place)
+    for folder in "bcdefg":
+        session.openAt([f"/{folder}/0.jpg", f"/{folder}/1.jpg"], 1)
+    session.catalog = None
+    assert saved == ["8.jpg"], f"the edit of /a/8.jpg went to {saved}"
+    assert paths == [f"/{folder}/1.jpg" for folder in "bcdefg"], f"told of the new photos, the open one was {paths}"
+    gate.set()
+    session.threads.shutdown(wait=True)
+    assert begun.count("1.jpg") <= 2 and len(begun) <= 3, f"six folders gone through at once: {len(begun)} photos decoded"
+
+
+def check_drop_last() -> None:
+    """The open photo taken out when it was the last: the one before it is open before
+    anybody is told (QML asked for the old place among fewer photos: IndexError)."""
+    session = app.Session([Path(f"/a/{n}.jpg") for n in range(3)], load=chart)
+    session.goTo(2)
+    paths = []
+    session.listed.connect(lambda: paths.append(session.path))
+    session.drop(["/a/2.jpg"])
+    session.threads.shutdown(wait=True)
+    assert paths == ["/a/1.jpg"], f"told of the photos left, the open one was {paths}"
+
 def check_one_count_waits() -> None:
     """Renders to be counted do not queue: while one count runs, only the latest waits (they
     used to pile up for as long as something was dragged, and the program lagged)."""
@@ -2448,6 +2489,63 @@ def check_library_rests() -> None:
         assert all(shown.model.data(shown.model.index(n), Qt.ItemDataRole.UserRole + 3) for n in range(6)), "a thumbnail made is one the grid is told of"
         shown.close()
         shown.makers.shutdown(wait=True)  # (one may still be writing into the folder that is about to go)
+        kept.close()
+
+
+def check_missing() -> None:
+    """A photo whose file is deleted stays, known as missing, until it is taken out: then it
+    leaves the library and the row of photos at hand, and nothing read from it is left."""
+    def wait(done, seconds: float = 8.0) -> bool:
+        until = time.time() + seconds
+        while not done() and time.time() < until:
+            QCoreApplication.processEvents()
+            time.sleep(0.005)
+        return done()
+
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder) / "photos"
+        root.mkdir()
+        for n in range(4):
+            picture_file(root / f"{n}.jpg", exif("X", "Y", f"2020:01:0{n + 1} 10:00:00", 1))
+        loose = picture_file(Path(folder) / "elsewhere.jpg", exif("X", "Y", "2022:01:01 10:00:00", 1))
+        kept = catalog.Catalog(Path(folder) / "catalog.db")
+        kept.add_folder(root)
+        kept.found(*library.scan(root, {}))
+        shown = library.Library(kept, Path(folder) / "cache")
+        shown.setFilter("raw", False)
+        row = [Path(path) for path in shown.paths()] + [loose]  # (newest first: 3, 2, 1, 0, and one the library does not have)
+        session = app.Session(row, load=chart, catalog=kept)
+        shown.attend(session)
+        session.goTo(1)
+        gone, there = str(root / "1.jpg"), str(root / "0.jpg")
+        assert not shown.missing(gone) and not shown.missing(str(loose)) and not shown.missing("")
+        key = library.identify(Path(gone))
+        kept.save(key, Path(gone), {"exposure": 1.0})
+        kept.mark([key], "stars", 4)
+        shown.made_here[gone] = {"of": "x"}  # (as if it were a denoised copy: what its file said)
+        Path(gone).unlink()
+        loose.unlink()
+        assert wait(lambda: shown.missing(gone) and shown.missing(str(loose))), "a deleted file is not known as missing"
+        assert session.count == 5 and shown.total == 4, "a missing photo left by itself"
+        shown.remove([there])
+        assert session.count == 5 and shown.total == 4, "a photo whose file is there was taken out"
+        shown.remove([gone, there, str(loose)])
+        assert shown.total == 3 and shown.rowOf(gone) == -1 and not shown.missing(gone) and gone not in shown.made_here
+        assert [photo.name for photo in session.photos] == ["3.jpg", "2.jpg", "0.jpg"] and session.path == str(root / "2.jpg"), \
+            f"the row after two were taken out, the open photo as it was: {session.photos}, {session.path}"
+        assert kept.load(key, Path(gone)) == {"exposure": 1.0}, "its edit went with it"
+        # The open photo taken out: the one after it is shown. Back on disk, it is the photo it was.
+        Path(gone).write_bytes((root / "0.jpg").read_bytes())  # (another file under that name)
+        (root / "2.jpg").unlink()
+        assert wait(lambda: shown.missing(str(root / "2.jpg")))
+        shown.remove([str(root / "2.jpg")])
+        assert session.path == there and session.index == 1 and session.count == 2
+        for file in (root / "3.jpg", root / "0.jpg"):
+            file.unlink()
+        assert wait(lambda: shown.missing(there) and shown.missing(str(root / "3.jpg")))
+        shown.remove([there, str(root / "3.jpg")])
+        assert session.count == 0 and session.path == "" and session.source == "" and shown.total == 0
+        shown.close()
         kept.close()
 
 
@@ -2823,6 +2921,7 @@ def main() -> None:
     check_raw_only()
     check_where_i_was()
     check_library_rests()
+    check_missing()
     check_export_files()
     check_checkpoints()
     check_copies_and_moves()
@@ -2830,6 +2929,8 @@ def main() -> None:
     check_steps_kept()
     check_recent()
     check_one_count_waits()
+    check_folders_fast()
+    check_drop_last()
     check_unsaved()
     check_painted()
     check_local()

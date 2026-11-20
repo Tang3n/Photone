@@ -23,7 +23,7 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import CancelledError, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import numpy as np
@@ -516,7 +516,8 @@ class Session(QObject):
                 self._install(path)
             except ValueError as trouble:
                 said.append(f"{path.name} cannot be used as a LUT: {trouble}.")
-        said += [f"{file} is installed already, as “{name}”." for file, name in self.twice]
+        said += [f"{file} is installed already" + (f", as “{name}”." if name != file else ".")
+                 for file, name in self.twice]
         self.say(" ".join(said))
 
     @Slot(str)
@@ -922,10 +923,20 @@ class Session(QObject):
     @Slot("QVariantList", int)
     def openAt(self, files: list, index: int) -> None:  # noqa: N802
         """Open these photos (the library's, as it shows them) and show the one at `index`."""
-        self.photos = [Path(f) for f in files]
+        self._listed_anew([Path(f) for f in files], index)
+
+    def _listed_anew(self, photos: list, index: int) -> None:
+        """Other photos are at hand, that one of them open. The edit is written first, while
+        the open photo still has its place (written after, within the moment an edit waits to
+        be saved, it went to the catalog under the path of whatever stood at that place among
+        the new ones, or not at all); and the place is the new one before anybody is told,
+        so that nobody asks for the photo at the old place among the new photos."""
+        self.flush()
+        self.photos = photos
+        self._index = max(0, min(len(photos) - 1, index))
         self._relisted()
-        if self.photos:
-            self._show(max(0, min(len(self.photos) - 1, index)))
+        if photos:
+            self._show(self._index)
 
     def _relisted(self) -> None:
         self._listing += 1
@@ -948,8 +959,13 @@ class Session(QObject):
         """Start decoding the photo shown, in both sizes for a raw file, before anything asks:
         the half size is then on screen as soon as it can be, and the full size shortly after
         whether or not the view needs it yet."""
-        for stale in self.fetching.values():  # of a photo since left: free what they bring
-            stale.add_done_callback(lambda f: f.exception() or f.result()[1].close())
+        # Of a photo since left: not begun at all if it has not been (gone through quickly,
+        # every folder's photo was decoded all the same, and the one stopped at waited behind
+        # them: 2.8 s after twenty-five folders where it takes 0.2 s); else what it brings is
+        # freed. (A list: Qt's image thread takes from `fetching` meanwhile.)
+        for stale in list(self.fetching.values()):
+            if not stale.cancel():
+                stale.add_done_callback(lambda f: f.exception() or f.result()[1].close())
         self.fetching = {}
         if not self.photos:
             return
@@ -1006,6 +1022,8 @@ class Session(QObject):
             return QImage(pixels.buf, *CHART, CHART[0] * 8, QImage.Format.Format_RGBA16FPx4).copy()
         try:
             meta, picture, small = self._picture(address, self.photos[int(index)], size != "full")
+        except CancelledError:
+            return blank  # left while this was being asked for
         except (decode.Unreadable, IndexError) as e:
             if int(generation) == self._generation:
                 self._failed = True
@@ -1102,6 +1120,28 @@ class Session(QObject):
         self.photos = [*self.photos[:self._index + 1], Path(path), *self.photos[self._index + 1:]]
         self._relisted()
         self._show(self._index + 1)
+
+    @Slot(list)
+    def drop(self, paths: list) -> None:
+        """These photos were taken out (their files are gone: Library.remove): they leave the
+        row. Was the open one among them, the one that stood after it is shown, or the last."""
+        gone = {Path(path) for path in paths}
+        if not gone.intersection(self.photos):
+            return
+        self.flush()  # (while the open photo still has its place)
+        was = self.photos[self._index] in gone
+        before = sum(photo in gone for photo in self.photos[:self._index])
+        self.photos = [photo for photo in self.photos if photo not in gone]
+        self._index = max(0, min(self._index - before, len(self.photos) - 1))
+        self._relisted()  # (the new place first: QML asks for the open photo when told)
+        if was and self.photos:
+            return self._show(self._index)
+        if was:  # nothing is left: no photo is open
+            self._size, self._info, self._failed = (0, 0), "", False
+            self.history = self._history()
+            self._generation += 1
+            self.photoChanged.emit()
+        self.refresh()
 
     @Property(bool, notify=changed)
     def develops(self) -> bool:

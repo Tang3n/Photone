@@ -36,8 +36,21 @@ Rectangle {
         target: session
         function onListingChanged() {
             strip.chosen = []; strip.from = -1
-            if (library.where !== strip.place) Qt.callLater(strip.restore)
+            if (library.where !== strip.place) { strip.elsewhere = true; Qt.callLater(strip.put) }
         }
+    }
+    // The row put right after its photos changed: once, and once the view has its new cells,
+    // not while it is told of them (moved from in there, it made every cell from the first to
+    // the open photo: 0.4 s for the 600th of a folder, and a folder chosen in Edit stood still
+    // that long). The open photo in sight; before that where the row was, if the photos are
+    // more or fewer of the same place (a denoised copy just written), and after it where the
+    // row was left in this place, if they are another's.
+    property bool elsewhere: false
+    function put() {
+        if (!elsewhere && place !== "" && place === library.where) restore()
+        row.positionViewAtIndex(current, ListView.Contain)
+        if (elsewhere) restore()
+        elsewhere = false
     }
     // How far along the row is, is remembered for each place of the library, as the photo
     // last looked at there is (the owner: "per folder, just like we persist the selected
@@ -124,10 +137,7 @@ Rectangle {
         Component.onCompleted: positionViewAtIndex(strip.current, ListView.Contain)
         // More or fewer photos (a denoised copy just written, beside its original) make the
         // view start over at its left end: back to where the row was, the open photo in sight.
-        onCountChanged: {
-            if (strip.place !== "" && strip.place === library.where) strip.restore()
-            positionViewAtIndex(strip.current, ListView.Contain)
-        }
+        onCountChanged: Qt.callLater(strip.put)
         delegate: Item {
             id: cell
             required property int index
@@ -142,6 +152,8 @@ Rectangle {
             // (The open photo by what it is now; the others by what the library last read.)
             readonly property bool edited: open ? session.edited : marks.edited === true
             readonly property bool taken: strip.chosen.includes(index)
+            // (Its file is gone from the disk: dimmed, and said so, until it is taken out.)
+            readonly property bool missing: (library.busy, library.missing(file))
             // (Asked anew with the list of photos; the library keeps what each file says.)
             readonly property bool denoised: file !== "" && library.denoised(file)
             readonly property bool second: denoised && index > 0 && library.copyOf(file, (session.listing, session.fileAt(index - 1)))   // the copy, its original before it
@@ -199,7 +211,7 @@ Rectangle {
                 source: cell.thumb; asynchronous: true; fillMode: Image.PreserveAspectFit
                 sourceSize: Qt.size(320, 320)
                 retainWhileLoading: true   // (made anew as the photo is edited: no empty cell meanwhile)
-                opacity: (cell.flag < 0 ? 0.3 : 1) * (strip.chosen.length > 0 && !cell.taken ? 0.4 : 1)   // rejected; not of the selection
+                opacity: (cell.flag < 0 || cell.missing ? 0.3 : 1) * (strip.chosen.length > 0 && !cell.taken ? 0.4 : 1)   // rejected, or missing; not of the selection
             }
             Item {
                 id: pic
@@ -240,7 +252,7 @@ Rectangle {
             // and a click sets it, the same click again takes it away.
             HoverHandler { id: pointed }
             readonly property bool known: marks.stars !== undefined   // (the library has this photo)
-            readonly property bool offered: pointed.hovered && known
+            readonly property bool offered: pointed.hovered && known && !missing
             // (One look for the three things that sit on a thumbnail: a dark, half-clear disc
             // with a drawn sign in it. Set, the disc is the sign's color and the sign white;
             // under the pointer it has a light ring. They were letters in circles of three
@@ -287,6 +299,15 @@ Rectangle {
                     Accessible.role: Accessible.StaticText; Accessible.name: "Denoised"
                     Icon { anchors.centerIn: parent; width: 14; height: 14; path: Theme.sparkSign; color: Theme.mark; filled: true }
                 }
+            }
+            Rectangle {
+                objectName: "strip-missing"
+                visible: cell.missing
+                anchors.centerIn: pic
+                width: missingWord.implicitWidth + 16; height: 20; radius: 10   // (wider than an upright picture: it stands over its sides)
+                color: Qt.rgba(0.05, 0.05, 0.06, 0.8); border { width: 1; color: Qt.rgba(1, 1, 1, 0.5) }
+                Accessible.role: Accessible.StaticText; Accessible.name: "Missing"
+                Label { id: missingWord; anchors.centerIn: parent; text: "Missing"; color: Theme.text; font.pixelSize: 11 }
             }
             Rectangle {   // its stars: five to click, as large as the cell lets them be
                 objectName: "strip-stars"

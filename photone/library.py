@@ -30,10 +30,12 @@ from PySide6.QtCore import (
     QAbstractListModel,
     QBuffer,
     QByteArray,
+    QFileSystemWatcher,
     QModelIndex,
     QObject,
     QSize,
     Qt,
+    QTimer,
     QUrl,
     Signal,
     Slot,
@@ -541,6 +543,7 @@ class Library(QObject):
     thumbsChanged = Signal()  # there is another thumbnail (the filmstrip asks again)
     thumbTaken = Signal()  # a render asked for by `grabThumb` is back
     kept = Signal(str)  # from a thumbnail thread: that thumbnail has been written anew
+    lost = Signal(list)  # photos whose files are gone were taken out (`remove`): their paths
     # Thumbnails being made at one time. Measured on 16 threads of CPU while scrolling at 240
     # frames a second: four made 120 a second, six 170, eight 230; with eight, one frame in
     # twenty came late (4.8 ms), with six none more than with four.
@@ -579,6 +582,15 @@ class Library(QObject):
         self.strip: set[str] = set()
         # (`made_here`: per file, what the neural denoiser says of it: dng.made_here, read once.)
         self.loose, self.made_here = {}, {}
+        # Photos whose files are no longer on disk (`absent`, by path) stay, shown as missing,
+        # until the owner takes them out (`remove`; the owner, 2026-11-20). The folders of the
+        # library's photos and of those open in Edit (`shown`) are watched; what a folder
+        # says has changed is looked at once it has been quiet for a moment (an export
+        # writing into it says so with every file).
+        self.shown, self.absent, self.stirred = [], set(), set()
+        self.watcher = QFileSystemWatcher(self)
+        self.settling = QTimer(self, singleShot=True, interval=300, timeout=self._stirred)
+        self.watcher.directoryChanged.connect(self._stir)
         self.made.connect(self._made)
         self.kept.connect(self._kept)
         self.scanned.connect(lambda done: self._news(scanning=not done))
@@ -603,6 +615,7 @@ class Library(QObject):
         for photo in self.all:
             photo["thumb"] = thumb_name(photo["key"])
         self._show()
+        self._watch()
         if scanning is False:  # a scan is over: the thumbnails there are not yet, in the background
             for photo in reversed(self.model.rows):
                 if photo["thumb"] not in self.model.ready:
@@ -818,6 +831,77 @@ class Library(QObject):
             if key:
                 self.catalog.found([listed(Path(path), Path(path).stat(), key)])
                 self._news()
+
+    # ---- files that are gone ---------------------------------------------------------------
+
+    def attend(self, session) -> None:
+        """Keep to that session's photos (the filmstrip's row), which need not be the
+        library's: which of them are missing is known, and one taken out leaves its row."""
+        self.lost.connect(session.drop)
+        session.listed.connect(lambda: self.follow(session.photos))
+        self.follow(session.photos)
+
+    def follow(self, photos) -> None:
+        """The photos at hand in Edit are these.
+        ponytail: each is asked for on the interface's thread when the row changes, a few
+        milliseconds for thousands on a local disk; on a slow network share that is a wait,
+        and the upgrade is to ask on a thread."""
+        self.shown = [str(photo) for photo in photos]
+        self._check(self.shown)
+        self._watch()
+
+    def _watch(self) -> None:
+        """Watch the folders that hold photos, and no others.
+        ponytail: a folder that is not there (a drive taken out) is not watched, and its
+        photos stay missing after it is back until the photos are listed again (another
+        folder opened, a scan). The upgrade is to watch the folder above it."""
+        want = {photo["folder"] for photo in self.all} | {str(Path(p).parent) for p in self.shown}
+        have = {str(Path(folder)): folder for folder in self.watcher.directories()}
+        if over := [folder for at, folder in have.items() if at not in want]:
+            self.watcher.removePaths(over)
+        if more := [folder for folder in want - have.keys() if os.path.isdir(folder)]:
+            self.watcher.addPaths(more)
+
+    def _stir(self, folder: str) -> None:
+        self.stirred.add(str(Path(folder)))
+        self.settling.start()
+
+    def _stirred(self) -> None:
+        """Something in these folders has changed: are their photos still there?"""
+        stirred, self.stirred = self.stirred, set()
+        self._check([photo["path"] for photo in self.all if photo["folder"] in stirred]
+                    + [path for path in self.shown if str(Path(path).parent) in stirred])
+        self._watch()
+
+    def _check(self, paths: list[str]) -> None:
+        now = (self.absent - set(paths)) | {path for path in paths if not os.path.exists(path)}
+        if now != self.absent:
+            self.absent = now
+            self.changed.emit()
+
+    @Slot(str, result=bool)
+    def missing(self, path: str) -> bool:
+        """That photo's file is no longer on disk: it can only be taken out (`remove`)."""
+        return path in self.absent
+
+    @Slot("QVariantList")
+    def remove(self, paths: list) -> None:
+        """Take out those of these photos whose files are gone (never one that is there): out
+        of the library, and `lost` says so to whoever shows them. What was read from the file
+        is forgotten, so a file written under that name later (a denoised copy, made again)
+        is not taken for it. Their edits and marks stay in the catalog, which knows a photo
+        by what it is: they are there again should the file come back."""
+        paths = [path for path in paths if path in self.absent]
+        if not paths:
+            return
+        if self.catalog:
+            self.catalog.found([], paths)
+        for path in paths:
+            self.made_here.pop(path, None)
+            self.loose.pop(path, None)
+        self.absent -= set(paths)
+        self._news()
+        self.lost.emit(paths)
 
     def _scan(self) -> None:
         """On the scanning thread, with a catalog connection of its own."""
