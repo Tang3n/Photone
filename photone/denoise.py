@@ -70,9 +70,10 @@ def _calmest(share: float = 1 / 3) -> float:
     return float(each[:int(len(each) * share)].mean())
 
 
-# The 12 compare-and-swaps that sort six values (an optimal sorting network).
-_SIX = ((1, 2), (4, 5), (0, 2), (3, 5), (0, 1), (3, 4), (1, 4), (0, 3), (2, 5), (1, 3), (2, 4),
-        (2, 3))
+# The 11 compare-and-swaps that put the third and fourth smallest of six values in places 2
+# and 3 (an optimal sorting network of six, but for its last, which would only order those
+# two: their sum is the same either way).
+_SIX = ((1, 2), (4, 5), (0, 2), (3, 5), (0, 1), (3, 4), (1, 4), (0, 3), (2, 5), (1, 3), (2, 4))
 
 
 def _median_of_six(d: np.ndarray) -> np.ndarray:
@@ -241,7 +242,7 @@ class Denoised:
 
     def camera(self, v: np.ndarray, own: bool = False) -> np.ndarray:
         """v -> the camera's own colors with its white balance on, 1 the sensor's white.
-        `own`: v is a array of no use afterwards, which becomes the result."""
+        `own`: v is an array of no use afterwards, which becomes the result."""
         out = np.maximum(v, 0, out=v if own else None)
         out /= self.scale
         np.square(out, out=out)
@@ -363,37 +364,48 @@ def run(path: Path, progress=None, stopped=None) -> Denoised:
     places = list(product(range(0, high, kept_), range(0, wide, kept_)))
     if progress:
         progress(0, len(places), net.where)
-    # The whole photo in the net's terms, once (in bands, on threads): the pieces are cut from it.
-    v = np.empty(noisy.shape, np.float32)
-
-    def band(k: int) -> None:
-        rows = slice(high * k // 8, high * (k + 1) // 8)
-        v[rows] = held.into(noisy[rows])
-
-    with ThreadPoolExecutor(8) as bands:
-        list(bands.map(band, range(8)))
-    norm = np.float32(MIDDLE / max(float(np.median(v[::4, ::4].mean(axis=2))), 1e-3))
+    v, norm = _terms(held)
     sigma = np.full((1, 1, 1, 1), norm, np.float32)
 
     def cut(at: tuple[int, int]) -> np.ndarray:
         return np.ascontiguousarray((_piece(v, *at, net.piece) * norm).transpose(2, 0, 1)[None])
 
-    for done, ((y, x), seen) in enumerate(zip(places, _ahead(cut, places), strict=True)):
-        if stopped and stopped():
-            raise Stopped
-        kept = held.clean[y:y + kept_, x:x + kept_]
-        kept[...] = net(seen, sigma)[0].transpose(1, 2, 0)[MARGIN:MARGIN + kept.shape[0],
-                                                           MARGIN:MARGIN + kept.shape[1]] / norm
-        held.where = net.where
-        if progress:
-            progress(done + 1, len(places), net.where)
+    # (Closed here, on this thread, however the loop ends: left to the exception's traceback,
+    # its thread would be shut down wherever that is let go, the interface's thread.)
+    with contextlib.closing(_ahead(cut, places)) as pieces:
+        for done, ((y, x), seen) in enumerate(zip(places, pieces, strict=True)):
+            if stopped and stopped():
+                raise Stopped
+            kept = held.clean[y:y + kept_, x:x + kept_]
+            kept[...] = net(seen, sigma)[0].transpose(1, 2, 0)[MARGIN:MARGIN + kept.shape[0],
+                                                               MARGIN:MARGIN + kept.shape[1]] / norm
+            held.where = net.where
+            if progress:
+                progress(done + 1, len(places), net.where)
     return held
+
+
+def _terms(held: Denoised) -> tuple[np.ndarray, np.float32]:
+    """(the whole photo in the net's terms, once (in bands, on threads): the pieces are cut
+    from it; what it is multiplied by for the net, so that its median sits at MIDDLE)."""
+    noisy = held.noisy
+    v = np.empty(noisy.shape, np.float32)
+
+    def band(k: int) -> None:
+        rows = slice(len(noisy) * k // 8, len(noisy) * (k + 1) // 8)
+        v[rows] = held.into(noisy[rows])
+
+    with ThreadPoolExecutor(8) as bands:
+        list(bands.map(band, range(8)))
+    return v, np.float32(MIDDLE / max(float(np.median(v[::4, ::4].mean(axis=2))), 1e-3))
 
 
 def _ahead(cut, places: list):
     """cut(place) of each place in turn, the next one cut on a thread of its own while the
     one before is worked on: ONNX Runtime lets go of Python's lock while it runs, and cutting
     a piece took 1.4 ms of the 29 a piece takes on the GPU."""
+    if not places:  # (a picture of no rows or no columns: nothing to cut)
+        return
     with ThreadPoolExecutor(1) as ahead:
         coming = ahead.submit(cut, places[0])
         for n in range(len(places)):
