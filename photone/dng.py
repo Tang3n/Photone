@@ -4,7 +4,8 @@ A denoised photo is no mosaic any more: it is kept as a "linear raw" DNG, three 
 a pixel in the camera's own colors (white balance not applied, 1.0 the sensor's white), with
 the camera's color matrix and as-shot white balance, so that any raw developer treats it as
 the raw file it came from. The pixels lie as the sensor had them, the header says which way
-is up, and the preview the camera made is carried along.
+is up, and the preview the camera made is carried along, with all the original's header says
+of the photo (`carried`: its EXIF and GPS directories whole, the maker's notes among them).
 
 The pixels are packed without loss as DNGs pack floats: in strips of STRIP rows, each row's
 bytes sorted by significance and turned into differences from the pixel before (TIFF's
@@ -35,13 +36,12 @@ STRIP = 256  # rows packed together: a piece of work for one thread, writing and
 # Quarter turns to the left (numpy's rot90) that put the sensor's picture upright, by the
 # header's orientation (EXIF: 3 upside down, 6 lying on its left side, 8 on its right).
 TURNS = {3: 2, 6: 3, 8: 1}
-# (tag: type) of what the header carries over from the original, where it has them: maker,
-# model and date in the first directory; shutter, aperture, ISO, date taken, exposure
-# compensation, focal length and lens in the EXIF one. Types: 2 text, 3 short, 5 fraction,
-# 10 signed fraction.
-FIRST = {0x10f: 2, 0x110: 2, 0x132: 2}
-EXIF = {0x829a: 5, 0x829d: 5, 0x8827: 3, 0x9003: 2, 0x9204: 10, 0x920a: 5, 0xa434: 2}
+# What the header carries over from the original's first directory, where it has them: maker,
+# model, date, who took it and whose it is. (Its EXIF and GPS directories come whole.)
+FIRST = (0x10f, 0x110, 0x132, 0x13b, 0x8298)
 FORM = {1: "B", 2: "s", 3: "H", 4: "I", 5: "I", 10: "i"}
+# Bytes of one number of each TIFF type (a fraction, 5 and 10, is two of them).
+SIZE = {1: 1, 2: 1, 3: 2, 4: 4, 5: 4, 6: 1, 7: 1, 8: 2, 9: 4, 10: 4, 11: 4, 12: 8, 13: 4}
 
 
 def _packed(kind: int, values) -> tuple[int, bytes]:
@@ -59,12 +59,17 @@ def _packed(kind: int, values) -> tuple[int, bytes]:
 
 def _directory(tags: dict, at: int) -> bytes:
     """A TIFF directory that will lie at `at` of the file, with what does not fit in its
-    entries straight after it. `tags`: {tag: (type, values)}; a value may be bytes (type 1)."""
+    entries straight after it. `tags`: {tag: (type, values)}; a value may be bytes (type 1);
+    or, as `carried` gives them, {tag: (type, how many, the bytes)}."""
     entries, extra = b"", b""
     after = at + 2 + 12 * len(tags) + 4
     for tag in sorted(tags):
-        kind, values = tags[tag]
-        count, data = (len(values), values) if isinstance(values, bytes) else _packed(kind, values)
+        kind, values, *ready = tags[tag]
+        if ready:
+            count, data = values, ready[0]
+        else:
+            count, data = ((len(values), values) if isinstance(values, bytes)
+                           else _packed(kind, values))
         if len(data) <= 4:
             where = data.ljust(4, b"\0")
         else:
@@ -76,6 +81,96 @@ def _directory(tags: dict, at: int) -> bytes:
 
 def _size_of(tags: dict) -> int:
     return len(_directory(tags, 0))
+
+
+def _entries(file, at: int, order: str, places: dict | None = None) -> dict:
+    """{tag: (type, how many, its values as little-endian bytes)} of the TIFF directory at `at`
+    of a file in that byte order; into `places`, where in the file each lay that was not in
+    its entry. Read as untrusted: at most 200 tags, of 1 MB each."""
+    file.seek(at)
+    count = struct.unpack(order + "H", file.read(2).ljust(2, b"\0"))[0]
+    entries, found = file.read(12 * min(count, 200)), {}
+    for n in range(0, len(entries) - 11, 12):
+        tag, kind, length, value = struct.unpack(order + "HHI4s", entries[n:n + 12])
+        unit = SIZE.get(kind, 0)
+        size = unit * (2 if kind in (5, 10) else 1) * length
+        if not 0 < size <= 1 << 20:
+            continue
+        if size > 4:
+            where = struct.unpack(order + "I", value)[0]
+            file.seek(where)
+            value = file.read(size)
+            if places is not None:
+                places[tag] = where
+        if len(value) < size:
+            continue
+        value = value[:size]
+        if order == ">" and unit > 1:
+            value = np.frombuffer(value, f">u{unit}").astype(f"<u{unit}").tobytes()
+        found[tag] = (kind, length, value)
+    return found
+
+
+def carried(path: Path) -> dict:
+    """What a raw file's header says of the photo, to be said again by the DNG made of it:
+    {"first": the FIRST tags, "exif": its EXIF directory, "gps": its GPS one}, each
+    {tag: (type, how many, bytes)} as `_directory` takes them. Nothing for a file that is no
+    TIFF (most raw formats are). With the maker's notes (0x927c) comes `notes`: (where they
+    lay, the file's byte order), for `_moved`."""
+    try:
+        with path.open("rb") as file:
+            head = file.read(8)
+            order = {b"II": "<", b"MM": ">"}.get(head[:2])
+            magic = struct.unpack(order + "H", head[2:4])[0] if order and len(head) == 8 else 0
+            if magic not in (42, 85):  # (85: Panasonic)
+                return {}
+            first = _entries(file, struct.unpack(order + "I", head[4:])[0], order)
+
+            places = {}
+
+            def below(tag: int) -> dict:
+                kind, count, value = first.get(tag, (0, 0, b""))
+                if kind not in (4, 13) or count != 1:
+                    return {}
+                found = _entries(file, struct.unpack("<I", value)[0], order, places)
+                found.pop(0xa005, None)  # (a pointer to a directory that does not come along)
+                return found
+
+            exif = below(0x8769)
+            return {"first": {tag: first[tag] for tag in FIRST if tag in first}, "exif": exif,
+                    "notes": (places.get(0x927c, 0), order), "gps": below(0x8825)}
+    except (OSError, struct.error):
+        return {}
+
+
+def _moved(exif: dict, at: int, lay: tuple[int, str]) -> dict:
+    """A carried EXIF directory for its place `at` of the new file: the maker's notes in it,
+    which `lay` at (where, in what byte order) of the old one, point where they now lie.
+    Sony's and Canon's are a TIFF directory
+    (Sony's after 12 bytes of name) whose pointers count from the start of the file: those
+    that point into the notes are moved along with them. Notes that are no such directory
+    (Nikon's, Fujifilm's, Olympus's count from their own start) stay as they are.
+    ponytail: one directory deep, and what a maker keeps outside its notes is not brought
+    along; the upgrade is Adobe's way, the notes in DNGPrivateData with where they lay."""
+    kind, length, notes = exif.get(0x927c, (0, 0, b""))
+    (was, order), now = lay, at + _directory(exif, at).find(notes)
+    start, out = 12 if notes.startswith(b"SONY") else 0, bytearray(notes)
+    count = struct.unpack(order + "H", notes[start:start + 2].ljust(2, b"\0"))[0]
+    if not was or not 0 < count <= 400 or start + 2 + 12 * count > len(notes):
+        return exif
+    for n in range(start + 2, start + 2 + 12 * count, 12):
+        _, form, many, where = struct.unpack(order + "HHII", notes[n:n + 12])
+        if form not in SIZE:
+            return exif  # (not a directory after all)
+        size = SIZE[form] * (2 if form in (5, 10) else 1) * many
+        if size > 4 and was <= where and where + size <= was + len(notes):
+            out[n + 8:n + 12] = struct.pack(order + "I", where - was + now)
+    return {**exif, 0x927c: (kind, length, bytes(out))}
+
+
+def _said(entry: tuple | None) -> str:
+    """A carried text."""
+    return entry[2].split(b"\0")[0].decode("ascii", "replace").strip() if entry else ""
 
 
 def _pack(part: np.ndarray) -> bytes:
@@ -109,7 +204,7 @@ def write(path: Path, rows, size: tuple[int, int], about: dict) -> None:  # noqa
     had it (asked for from several threads at once); `size`: (wide, high) of all of it.
     `about`: `cam_xyz` and `wb` (the camera's
     matrix from XYZ and its white balance as gains, green 1), `turned` (the header's
-    orientation), `header` ({tag: value} of FIRST and EXIF), `preview` (a JPEG and its
+    orientation), `header` (what `carried` found in the original), `preview` (a JPEG and its
     (wide, high), or None), `kept` (what `read` hands on: see there) and `neural` (what was
     done: the model and the shares)."""
     wide, high = size
@@ -117,7 +212,8 @@ def write(path: Path, rows, size: tuple[int, int], about: dict) -> None:  # noqa
     with ThreadPoolExecutor(8) as threads:
         strips = list(threads.map(lambda top: _pack(rows(top, min(top + STRIP, high))), tops))
     private = OURS + json.dumps({"neural": about["neural"], **about["kept"]}).encode("utf-8")
-    header, preview = about.get("header", {}), about.get("preview")
+    header, preview = about.get("header") or {}, about.get("preview")
+    had, exif, gps = (dict(header.get(part, {})) for part in ("first", "exif", "gps"))
     neutral = [1 / gain for gain in about["wb"]]
     first = {
         254: (4, 0), 256: (4, wide), 257: (4, high), 258: (3, [16, 16, 16]), 259: (3, 8),
@@ -125,13 +221,12 @@ def write(path: Path, rows, size: tuple[int, int], about: dict) -> None:  # noqa
         277: (3, 3), 278: (4, STRIP), 279: (4, [len(strip) for strip in strips]), 284: (3, 1),
         305: (2, about.get("software", "Photone")), 317: (3, 3), 339: (3, [3, 3, 3]),
         50706: (1, bytes([1, 4, 0, 0])), 50707: (1, bytes([1, 4, 0, 0])),
-        50708: (2, " ".join(filter(None, (header.get(0x10f), header.get(0x110)))) or "Photone"),
+        50708: (2, " ".join(filter(None, map(_said, map(had.get, (0x10f, 0x110))))) or "Photone"),
         50714: (5, [0, 0, 0]), 50717: (4, [1, 1, 1]),
         50721: (10, [v for row in about["cam_xyz"] for v in row]), 50728: (5, neutral),
         50740: (1, private), 50778: (3, 21),
-        **{tag: (kind, header[tag]) for tag, kind in FIRST.items() if header.get(tag)},
+        **had,
     }
-    exif = {tag: (kind, header[tag]) for tag, kind in EXIF.items() if header.get(tag)}
     small = preview and {
         254: (4, 1), 256: (4, preview[1][0]), 257: (4, preview[1][1]), 258: (3, [8, 8, 8]),
         259: (3, 7), 262: (3, 6), 273: (4, 0), 277: (3, 3), 278: (4, preview[1][1]),
@@ -139,19 +234,26 @@ def write(path: Path, rows, size: tuple[int, int], about: dict) -> None:  # noqa
     # Where each part lies: the directories one after another, the preview, then the pixels.
     if exif:
         first[34665] = (4, 0)
+    if gps:
+        first[34853] = (4, 0)
     if small:
         first[330] = (4, 0)
     exif_at = 8 + _size_of(first)
-    small_at = exif_at + (_size_of(exif) if exif else 0)
+    gps_at = exif_at + (_size_of(exif) if exif else 0)
+    small_at = gps_at + (_size_of(gps) if gps else 0)
     jpeg_at = small_at + (_size_of(small) if small else 0)
     pixels_at = -(-(jpeg_at + (len(preview[0]) if small else 0)) // 8) * 8
     first[273] = (4, [pixels_at + sum(len(s) for s in strips[:n]) for n in range(len(strips))])
     if exif:
         first[34665] = (4, exif_at)
+    exif = _moved(exif, exif_at, header.get("notes", (0, "<")))
+    if gps:
+        first[34853] = (4, gps_at)
     if small:
         first[330], small[273] = (4, small_at), (4, jpeg_at)
     head = b"II*\0" + struct.pack("<I", 8) + _directory(first, 8)
     head += _directory(exif, exif_at) if exif else b""
+    head += _directory(gps, gps_at) if gps else b""
     head += (_directory(small, small_at) + preview[0]) if small else b""
     new = path.with_name(path.name + ".part")
     try:

@@ -2511,9 +2511,7 @@ def check_denoise() -> None:
     reduction on it. (The net itself runs on a real file: PHOTONE_SAMPLE.)"""
     cam_xyz = [[0.746, -0.2365, -0.0588], [-0.5687, 1.3442, 0.2474], [-0.0624, 0.1156, 0.6584]]
     about = {"wb": [2.4, 1.0, 1.6], "cam_xyz": cam_xyz, "a": 2.0, "b": 30.0, "room": 15868.0,
-             "light": [0.05, 0.4], "lens": {"distortion": [1, 2, 3]}, "turned": 8, "preview": None,
-             "header": {0x10f: "SONY", 0x110: "ILCE-7M4", 0x8827: 6400, 0x829a: 0.004, 0x9204: -1.3,
-                        0x9003: "2026:07:10 21:53:15", 0xa434: "A lens"}}
+             "light": [0.05, 0.4], "lens": {"distortion": [1, 2, 3]}, "turned": 8, "preview": None}
     rng = np.random.default_rng(3)
     # (Grays with a little color: a color no camera records has no place in the net's terms.)
     noisy = (rng.random((30, 44, 1)) * 30000 + 2000 + rng.random((30, 44, 3)) * 1500).astype(np.uint16)
@@ -2530,7 +2528,33 @@ def check_denoise() -> None:
     assert np.allclose(held.picture()[..., :3], np.clip(held.camera(held.clean) @ held.from_cam.T, 0, 1), atol=2e-3)
     with tempfile.TemporaryDirectory() as folder:
         raw = Path(folder) / "shot.ARW"
-        raw.write_bytes(b"II*\0" + b"\0" * 64)
+        # The original's header, as a camera writes one: a first directory, EXIF with the
+        # maker's notes, GPS. All of it is in the denoised file's.
+        # (Sony's notes: a directory of two tags, one pointing at 8 bytes within the notes
+        # by their place in the file, which is another in the new file.)
+        def sony(at: int) -> bytes:
+            return (b"SONY DSC \0\0\0" + struct.pack("<HHHIIHHII", 2, 0x102, 3, 1, 7, 0xb027, 4, 2, at + 38)
+                    + b"lenstype")
+
+        notes = sony(0)
+        first = {0x10f: (2, "SONY"), 0x110: (2, "ILCE-7M4"), 0x8769: (4, 0), 0x8825: (4, 0)}
+        exif = {0x8827: (3, 6400), 0x829a: (5, [0.004]), 0x9204: (10, [-1.3]), 0x927c: (7, notes),
+                0x9003: (2, "2026:07:10 21:53:15"), 0xa434: (2, "A lens"), 0xa005: (4, 8)}
+        gps = {0: (1, bytes([2, 3, 0, 0])), 2: (5, [50, 5, 12.5])}
+        exif_at = 8 + len(dng._directory(first, 8))
+        first[0x8769], first[0x8825] = (4, exif_at), (4, exif_at + len(dng._directory(exif, 0)))
+        notes_at = exif_at + dng._directory(exif, exif_at).find(notes)
+        notes = exif[0x927c] = (7, sony(notes_at))
+        raw.write_bytes(b"II*\0" + struct.pack("<I", 8) + dng._directory(first, 8)
+                        + dng._directory(exif, exif_at) + dng._directory(gps, first[0x8825][1]))
+        about["header"] = dng.carried(raw)
+        assert about["header"]["exif"][0x927c] == (7, 46, notes[1]) and about["header"]["notes"] == (notes_at, "<")
+        assert 0xa005 not in about["header"]["exif"]
+        other = Path(folder) / "other.NEF"  # (the other byte order: turned as it is read)
+        other.write_bytes(b"MM\0*" + struct.pack(">IHHHIHHI", 8, 1, 0x8827, 3, 1, 6400, 0, 0))
+        with other.open("rb") as file:
+            assert dng._entries(file, 8, ">")[0x8827] == (3, 1, struct.pack("<H", 6400)), "big-endian"
+        other.unlink()
         assert denoise.target(raw).name == "shot-Denoised.dng"
         out = denoise.save(held, raw, 0.7, 0.4)
         assert out.name == "shot-Denoised.dng" and denoise.target(raw).name == "shot-Denoised-2.dng", "never written over"
@@ -2550,6 +2574,10 @@ def check_denoise() -> None:
         assert np.allclose(seen[..., :3], want, atol=2e-3) and (seen[..., 3] == 1).all(), "what was written is what is shown"
         half, _ = decode.load(out, half=True)
         assert (half["width"], half["height"], half["full"], half["size"]) == (22, 15, [44, 30], "half"), half
+        again, whole = dng.carried(out), out.read_bytes()
+        assert again["gps"] == about["header"]["gps"] and {**again["exif"], 0x927c: 0} == {**about["header"]["exif"], 0x927c: 0}, "the whole header"
+        now = again["notes"][0]
+        assert now != notes_at and again["exif"][0x927c][2] == sony(now) and whole[now + 38:now + 46] == b"lenstype", "the maker's notes point at themselves where they now lie"
         said = library.describe(out)
         assert said["camera"] == "SONY ILCE-7M4" and said["turned"] == 8 and said["bias"] == -1.3, said
         assert library.about(out)["iso"] == "ISO 6400" and library.about(out)["shutter"] == "1/250 s", library.about(out)

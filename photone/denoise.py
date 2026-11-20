@@ -111,18 +111,6 @@ def known(shape: tuple, iso: float) -> tuple[float, float] | None:
 
 # --- A raw file, as the net wants it -------------------------------------------------------
 
-def _header(path: Path) -> dict:
-    """What the original's header says that the DNG's will say too (dng.FIRST, dng.EXIF)."""
-    from photone import library  # (it imports the interface's classes: only when needed)
-
-    try:
-        with path.open("rb") as file:
-            start = library._exif_start(file)
-            return library._tiff(file, start) if start is not None else {}
-    except (OSError, ValueError):
-        return {}
-
-
 def develop(path: Path) -> tuple[np.ndarray, dict]:
     """((h, w, 3) uint16 scene-linear Rec.2020, the very picture Photone shows at full size;
     what is known of the photo: the camera's `wb` and `cam_xyz`, the noise's `a` and `b` over
@@ -153,7 +141,8 @@ def develop(path: Path) -> tuple[np.ndarray, dict]:
                                   highlight_mode=rawpy.HighlightMode.Clip)
     except (rawpy.LibRawError, OSError) as e:
         raise ValueError(f"{path.name} cannot be read as a raw photo ({e}).") from None
-    about.update(turned={3: 3, 5: 8, 6: 6}.get(sizes.flip, 1), header=_header(path), preview=jpeg)
+    about.update(turned={3: 3, 5: 8, 6: 6}.get(sizes.flip, 1), header=dng.carried(path),
+                 preview=jpeg)
     return np.ascontiguousarray(rgb[decode.kept(sizes, False)]), about
 
 
