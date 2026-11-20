@@ -32,7 +32,36 @@ Rectangle {
             from = index
         }
     }
-    Connections { target: session; function onListingChanged() { strip.chosen = []; strip.from = -1 } }
+    Connections {
+        target: session
+        function onListingChanged() {
+            strip.chosen = []; strip.from = -1
+            if (library.where !== strip.place) Qt.callLater(strip.restore)
+        }
+    }
+    // How far along the row is, is remembered for each place of the library, as the photo
+    // last looked at there is (the owner: "per folder, just like we persist the selected
+    // photo for each folder"): the cell at the row's left end and how much of it is out of
+    // sight, which holds however tall the strip is. `place`: the one the row was last put
+    // right for, none when the photos are not the library's (a photo named at the start).
+    property string place: ""
+    property var ats: { try { return JSON.parse(session.remembered("view/strip_at", "{}")) } catch (e) { return {} } }
+    function keep() {
+        const cell = row.itemAt(row.contentX, row.height / 2) || row.itemAt(row.contentX + row.spacing + 1, row.height / 2)
+        if (place === "" || !cell) return
+        ats[place] = [cell.index, Math.round((row.contentX - cell.x) / cell.width * 1000) / 1000]
+        session.remember("view/strip_at", JSON.stringify(ats))
+    }
+    function restore() {
+        place = library.where
+        const at = ats[place]
+        if (!at) return   // (never scrolled there: the open photo is in sight, as it was put)
+        row.positionViewAtIndex(at[0], ListView.Beginning)
+        const cell = row.itemAtIndex(at[0])
+        if (cell) row.contentX += at[1] * cell.width
+        row.returnToBounds()
+    }
+    Timer { id: keeping; interval: 300; onTriggered: strip.keep() }
     // A photo and its denoised copy stand as a pair: further apart than photos otherwise
     // (`pairGap`), one outline round both that dips a little between them (`pairDip`, as a
     // share of its height at top and foot; 0: a plain rounded outline), a link in the gap.
@@ -82,6 +111,7 @@ Rectangle {
         // Where the open photo is, if not in sight: -1 to the left, 1 to the right. (Asked of
         // its cell while there is one: made taller or lower, the view does not count from 0.)
         readonly property real along: contentX - originX
+        onAlongChanged: keeping.restart()
         readonly property int away: {
             if (spare > 0) return 0   // (every photo is in sight)
             const cell = (count, pace, width, contentWidth, itemAtIndex(strip.current)), from = contentX

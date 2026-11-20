@@ -2909,6 +2909,39 @@ def audit_resume() -> list[str]:
     faults.expect(settings.value("library/where") == "all", f"another place chosen in the library is not remembered: {settings.value('library/where')}")
     ui.close_view(view)
     shown.close()
+    # The strip is as tall as it was dragged, and as far along as it was left in each place
+    # (the owner: "the scroll amount on that strip (per folder ...)").
+    shown, session, view, root = started("edit")
+    wait(lambda: root.property("photoReady"), 4000)
+    drag(view, box(find(root, "strip-edge")).center().toPoint(), QPoint(0, -120))
+    view.grabWindow()
+    strip, row = find(root, "box:strip"), find(root, "strip-row")
+    high = strip.height()
+
+    def along() -> float:
+        return row.property("contentX") - row.property("originX")
+
+    far = min(333.0, row.property("contentWidth") - row.width())
+    row.setProperty("contentX", row.property("originX") + far)
+    QTest.qWait(400)
+    faults.expect(far > 50 and "all" in str(settings.value("view/strip_at")), f"scrolled {far:.0f} px along, the strip kept {settings.value('view/strip_at')}")
+    shown.show("month:2026-07")
+    session.openAt(shown.paths(), 0)
+    QTest.qWait(400)
+    shown.show("all")
+    session.openAt(shown.paths(), 0)
+    QTest.qWait(400)
+    faults.expect(abs(along() - far) <= 2, f"back in a place left {far:.0f} px along, the strip is {along():.0f} px along")
+    ui.close_view(view)
+    shown.close()
+    shown, session, view, root = started("edit")
+    wait(lambda: root.property("photoReady"), 4000)
+    view.grabWindow()
+    strip, row = find(root, "box:strip"), find(root, "strip-row")
+    faults.expect(abs(strip.height() - high) <= 1, f"dragged {high:.0f} px tall, the strip starts {strip.height():.0f} px tall")
+    faults.expect(abs(along() - far) <= 2, f"left {far:.0f} px along, the strip starts {along():.0f} px along")
+    ui.close_view(view)
+    shown.close()
     return faults
 
 
