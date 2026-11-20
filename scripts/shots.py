@@ -3184,7 +3184,33 @@ def audit_strip() -> list[str]:
     drag(view, box(find(root, "strip-edge")).center().toPoint(), QPoint(0, -90))
     view.grabWindow()
     faults.expect(abs(strip.height() - 90) <= 1 and row.property("visible"), f"dragged up again by 90 px, the strip is {strip.height():.0f} px tall")
+    # A denoised copy just written is shown beside its original: the row stays there, and
+    # does not start over at its left end.
+    session.goTo(10)
+    wait(lambda: root.property("photoReady"))
+    call(strip, "bringBack")
+    QTest.qWait(400)  # (where the row is, is kept a moment after it has moved)
+    settle()
+    copy = Path(session.path).with_name("IMG_4110-denoised.jpg")
+    copy.write_bytes(Path(session.path).read_bytes())
+    session.openBeside(str(copy))
+    wait(lambda: root.property("photoReady"))
+    settle()
+    faults.expect(session.index == 11 and row.property("away") == 0,
+                  f"a file opened beside the open photo is out of sight in the strip (the row is {row.property('contentX') - row.property('originX'):.0f} px along)")
     faults += audit_layout(view)
+    # The open photo far out of sight to the left: the button that brings it back stands at
+    # the left end wherever the row is, also with a gap between two cells in its middle.
+    session.goTo(0)
+    wait(lambda: root.property("photoReady"))
+    root.setProperty("stripHigh", 260)
+    settle()
+    view.grabWindow()
+    end, sides = row.property("contentWidth") + row.property("originX") - row.width(), set()
+    for back in range(0, 700, 2):
+        row.setProperty("contentX", end - back)
+        sides.add(row.property("away"))
+    faults.expect(sides == {-1}, f"the open photo out of sight to the left, the button to bring it back stands at {sides} as the row moves")
     shown.close()
     ui.close_view(view)
     return faults

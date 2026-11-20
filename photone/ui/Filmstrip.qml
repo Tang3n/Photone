@@ -116,9 +116,18 @@ Rectangle {
             if (spare > 0) return 0   // (every photo is in sight)
             const cell = (count, pace, width, contentWidth, itemAtIndex(strip.current)), from = contentX
             if (cell) return cell.x + cell.width < from + 8 ? -1 : cell.x > from + width - 8 ? 1 : 0
-            return strip.current < indexAt(from + width / 2, height / 2) ? -1 : 1
+            // (Between two cells there is none: the next one to the left is asked.)
+            let seen = -1
+            for (let x = from + width / 2; seen < 0 && x > from; x -= 8) seen = indexAt(x, height / 2)
+            return strip.current < seen ? -1 : 1
         }
         Component.onCompleted: positionViewAtIndex(strip.current, ListView.Contain)
+        // More or fewer photos (a denoised copy just written, beside its original) make the
+        // view start over at its left end: back to where the row was, the open photo in sight.
+        onCountChanged: {
+            if (strip.place !== "" && strip.place === library.where) strip.restore()
+            positionViewAtIndex(strip.current, ListView.Contain)
+        }
         delegate: Item {
             id: cell
             required property int index
