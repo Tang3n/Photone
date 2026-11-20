@@ -263,7 +263,7 @@ Item {
                     PushButton {
                         id: confirm
                         objectName: "denoise-confirm"
-                        label: "Denoise"; tint: Theme.green
+                        label: window.there ? "Accept" : "Denoise"; tint: Theme.green
                         enabled: window.there && denoiser.state === "ready"; opacity: enabled ? 1 : 0.4
                         onPressed: if (enabled) denoiser.save(window.colorShare / 100, window.grainShare / 100)
                     }
