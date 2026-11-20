@@ -2816,7 +2816,7 @@ Rectangle {
         onClosed: root.forceActiveFocus()
         // The new file: found by the library where its folder is one of the library's, and
         // shown straight after its original.
-        onDone: (path) => { library.rescan(); session.openBeside(path) }
+        onDone: (path) => { library.take(path); session.openBeside(path) }
     }
 
     // ---- A question that must be answered before anything else ---------------------------

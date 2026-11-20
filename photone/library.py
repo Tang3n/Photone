@@ -285,6 +285,14 @@ def _same_name(files) -> dict[Path, list[Path]]:
     return out
 
 
+def listed(photo: Path, about: os.stat_result, key: str, pair: str | None = None) -> dict:
+    """A photo as the catalog lists it (catalog.FIELDS)."""
+    said = describe(photo)
+    return {"key": key, "path": str(photo), "folder": str(photo.parent), "name": photo.name,
+            "size": about.st_size, "changed": about.st_mtime, "taken": said["taken"],
+            "camera": said["camera"], "kind": kind_of(photo), "pair": pair}
+
+
 def scan(folder: Path, known: dict[str, tuple[int, float]],
          each=None) -> tuple[list[dict], list[str]]:
     """Every photo under a folder: (rows for those that are new or have changed, the paths of
@@ -313,10 +321,7 @@ def scan(folder: Path, known: dict[str, tuple[int, float]],
             if key is None:
                 continue
             pair = next((str(f) for f in beside[photo.with_suffix("")] if f != photo), None)
-            said = describe(photo)
-            rows.append({"key": key, "path": str(photo), "folder": here, "name": photo.name,
-                         "size": size, "changed": changed, "taken": said["taken"],
-                         "camera": said["camera"], "kind": kind_of(photo), "pair": pair})
+            rows.append(listed(photo, about, key, pair))
             if each and len(rows) >= BATCH:
                 each(rows)
                 rows = []
@@ -800,6 +805,19 @@ class Library(QObject):
         self._busy = True
         self.changed.emit()
         threading.Thread(target=self._scan, daemon=True, name="scan").start()
+
+    @Slot(str)
+    def take(self, path: str) -> None:
+        """A file just written in one of the library's folders (a denoised copy) is one of its
+        photos at once: resting, the library looks through no folder, and until it did the
+        filmstrip knew nothing of the file, not its marks and not that it has an edit."""
+        if not self.catalog or not any(within(path, folder) for folder in self.catalog.folders()):
+            return
+        with contextlib.suppress(OSError):
+            key = identify(Path(path))
+            if key:
+                self.catalog.found([listed(Path(path), Path(path).stat(), key)])
+                self._news()
 
     def _scan(self) -> None:
         """On the scanning thread, with a catalog connection of its own."""

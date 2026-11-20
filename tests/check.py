@@ -2346,6 +2346,11 @@ def check_library_rests() -> None:
         shown.rest(True)
         shown.rescan()
         assert not shown.busy and not wait(lambda: shown.total > 0, 0.5), "resting, the library scanned its folders"
+        shown.take(str(Path(folder) / "elsewhere.jpg")), shown.take(str(root / "none.jpg"))
+        assert shown.total == 0, "a file outside the library's folders, or one that is not there, was taken in"
+        kept.save(library.identify(root / "3.jpg"), root / "3.jpg", {"exposure": 1.0})
+        shown.take(str(root / "3.jpg"))  # (a denoised copy just written: known at once, edit and all)
+        assert shown.total == 1 and shown.marksOf(str(root / "3.jpg")).get("edited") is True, "resting, a file just written is not one of the library's photos"
         handed, library.BATCH = [], 2  # a folder fills while it is being read, not all at the end
         rest, _ = library.scan(root, {}, lambda rows: handed.append(len(rows)))
         library.BATCH = 100
