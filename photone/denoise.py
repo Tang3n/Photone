@@ -327,12 +327,15 @@ def run(path: Path, progress=None, stopped=None) -> Denoised:
 
 def _piece(seen: np.ndarray, y: int, x: int, piece: int) -> np.ndarray:
     """The piece (`piece` a side) of the photo whose kept part begins at (y, x), with its
-    margin; past the photo's edge, the edge's pixels again."""
+    margin; past the photo's edge, the photo mirrored in it. (The edge's pixels again made
+    lines of the outermost row's noise, a hundred pixels long: to the net those are something
+    in the picture, so it left that row half its noise and drew streaks inward from it. The
+    owner: "the same artifact around the edges". Mirrored, the noise there is noise.)"""
     top, left, reach = max(y - MARGIN, 0), max(x - MARGIN, 0), piece - MARGIN
     part = seen[top:y + reach, left:x + reach]
     above, before = top - (y - MARGIN), left - (x - MARGIN)
     return np.pad(part, ((above, piece - above - part.shape[0]),
-                         (before, piece - before - part.shape[1]), (0, 0)), "edge")
+                         (before, piece - before - part.shape[1]), (0, 0)), "reflect")
 
 
 def target(path: Path) -> Path:

@@ -2566,6 +2566,13 @@ def check_denoise() -> None:
     # (Grays with a little color: a color no camera records has no place in the net's terms.)
     noisy = (rng.random((30, 44, 1)) * 30000 + 2000 + rng.random((30, 44, 3)) * 1500).astype(np.uint16)
     held = denoise.Denoised(noisy, about)
+    # Past the photo's edge a piece is the photo mirrored, never one row of it again and again.
+    ramp = np.arange(40 * 30 * 3, dtype=np.float32).reshape(40, 30, 3)
+    piece = denoise._piece(ramp, 0, 0, 256)
+    at = denoise.MARGIN
+    assert piece.shape == (256, 256, 3) and (piece[at:at + 40, at:at + 30] == ramp).all()
+    assert (piece[at - 3, at:at + 30] == ramp[3]).all() and (piece[at + 42, at:at + 30] == ramp[36]).all(), "mirrored in the edge"
+    assert (piece[at:at + 40, at - 3] == ramp[:, 3]).all() and (piece[1:] != piece[:-1]).any(axis=(1, 2)).all(), "no row twice running"
     whole = slice(0, 30)
     v = held.into(noisy)
     assert np.allclose(held.camera(v) @ held.from_cam.T, noisy / 65535, atol=2e-5), "into the net's terms and back"
