@@ -905,6 +905,59 @@ def curve_at(points, x: float) -> float:
     return points[-1][1]
 
 
+# OKLab's lightness of a linear Rec.2020 color: what the tone curve works on (ui/oklab.glsl).
+TO_LMS = np.array([[0.6166703, 0.3602644, 0.0230653], [0.2650725, 0.6358695, 0.0990580],
+                   [0.1000613, 0.2038777, 0.6960610]])
+LIGHTNESS = np.array([0.2104542553, 0.7936177850, -0.0040720468])
+# The shares of a picture (percent, from its darkest) at which `matched` lines up two pictures.
+MATCH = (2, 10, 25, 50, 75, 90, 98)
+
+
+def lightness(rgb) -> np.ndarray:
+    """The lightness of linear Rec.2020 colors (..., 3), as the shader's tone curve sees it."""
+    return np.cbrt(np.asarray(rgb, float) @ TO_LMS.T) @ LIGHTNESS
+
+
+def curve_of(edit: dict, camera: dict | None) -> list[list[float]]:
+    """The tone curve: what the edit says; or, where it says nothing, the photo's own (the
+    camera's `match`, decode.match_of: the curve that shows a raw file as the camera's own
+    picture shows it, at Exposure 0 and with the Standard profile, whichever profile is
+    chosen); straight where there is none (a finished picture, a sensor that is no mosaic of
+    red, green and blue, a file with no preview).
+
+    How it came to this, 2026-11-20. A photo started lighter than shot as far as its picture
+    had room, never lower and by two stops at most (the rule of 2026-11-17, `catalog._start_5`):
+    of 200 of the owner's photos it showed half more than two thirds of a stop lighter than
+    the camera's own picture, and 11 % more than a stop and a half; "i think it overshoots by
+    a lot where i think ART never does". ART never moves Exposure: its default for raw files
+    draws this curve ("i want it exactly like in art"). Of 150 photos, with it the middle of
+    the picture is within 0.001 of the camera's, and 5 have over 2 % more of the picture at
+    white than the camera's picture has (22 under the rule before).
+
+    ponytail: an edit that names no curve follows `matched`, so a change to it changes every
+    such photo, and the catalog has to write out what they had (`Catalog._keep`, four times
+    for Exposure so far). The upgrade is to keep the curve with the edit when it is made."""
+    given = edit.get("curve")
+    return given if given is not None else (camera or {}).get("match") or STRAIGHT
+
+
+def matched(ours, theirs) -> list[list[float]]:
+    """The tone curve that makes a picture of `ours` lightnesses (0..1, any shape) as light
+    as one of `theirs`: where a share of ours is darker than x, the same share of theirs is
+    darker than y, and the curve goes through (x, y), at seven shares (`MATCH`). It is how
+    ART starts a raw photo: it never touches Exposure, it draws the curve that takes its own
+    plain rendering to the picture the camera put in the file (its histmatching.cc, which
+    keeps five points of the mapping; the owner: "i want it exactly like in art"). As there,
+    the curve never cuts off: it starts at black and ends at white, a point that would lie
+    nearer than 0.04 to the one before, lower than it, or at either end of what can be shown
+    is left out, and the line between the points never swings past them (`slopes`)."""
+    points = [[0.0, 0.0]]
+    for x, y in zip(np.percentile(ours, MATCH), np.percentile(theirs, MATCH), strict=True):
+        if x - points[-1][0] >= 0.04 and x <= 0.96 and max(points[-1][1], 0.005) <= y <= 0.97:
+            points.append([round(float(x), 4), round(float(y), 4)])
+    return [*points, [1.0, 1.0]]
+
+
 LINE = 257  # heights a curve is drawn from (65 cut the corners of a steep curve: the owner saw)
 
 

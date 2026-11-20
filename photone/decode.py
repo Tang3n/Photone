@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from photone import dng, lens
+from photone import dng, edit, lens
 
 RAW = {".arw", ".cr2", ".cr3", ".dng", ".nef", ".orf", ".pef", ".raf", ".rw2"}
 RASTER = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -77,13 +77,11 @@ def camera(wb, cam_xyz) -> dict | None:
     return {"wb": (wb / wb[1]).tolist(), "cam_xyz": cam_xyz.tolist()}
 
 
-def light_of(raw) -> list[float] | None:
-    """How light the picture is as the sensor recorded it, before any developing: [the median
-    lightness, the level that only the brightest twentieth of the picture is above (`TOP`), by
-    each cell's highest channel], shares of the sensor's white, with
-    the camera's white balance on. From one cell in 64 of the sensor's mosaic, so it is the
-    same whichever size is developed afterwards (the exposure a photo starts with goes by it:
-    edit.exposure_of). None for a sensor that is not a mosaic of red, green and blue."""
+def sampled(raw) -> np.ndarray | None:
+    """One cell in 64 of the sensor's mosaic as colors: (rows, columns, 3) of red, green and
+    blue, shares of the sensor's white with the camera's white balance on, before any
+    developing: so the same whichever size is developed afterwards. None for a sensor that
+    is not a mosaic of red, green and blue."""
     pattern, gains = raw.raw_pattern, np.array(raw.camera_whitebalance, float)
     gains[3] = gains[3] or gains[1]
     if pattern is None or pattern.shape != (2, 2) or raw.color_desc != b"RGBG" or gains.min() <= 0:
@@ -100,10 +98,70 @@ def light_of(raw) -> list[float] | None:
         dark = float(black[color])
         share = (mosaic[down:high:16, across:wide:16] - dark) / (white - dark)
         seen[1 if color == 3 else color].append(np.clip(share * gains[color] / gains.min(), 0, 1))
-    red, green, blue = (np.mean(planes, axis=0) for planes in seen)
-    light = LUMA[0] * red + LUMA[1] * green + LUMA[2] * blue
-    top = np.maximum(np.maximum(red, green), blue)
-    return [float(np.median(light)), float(np.percentile(top, TOP))]
+    return np.stack([np.mean(planes, axis=0) for planes in seen], axis=-1)
+
+
+def light_of(raw) -> list[float] | None:
+    """How light the picture is as the sensor recorded it, before any developing: [the median
+    lightness, the level that only the brightest twentieth of the picture is above (`TOP`), by
+    each cell's highest channel], shares of the sensor's white, of `sampled`'s cells. None
+    where that has none."""
+    cells = sampled(raw)
+    if cells is None:
+        return None
+    return [float(np.median(cells @ np.array(LUMA))), float(np.percentile(cells.max(axis=-1), TOP))]
+
+
+def match_of(raw, about: dict | None) -> list[list[float]] | None:
+    """The tone curve a raw photo starts with (edit.matched): the one that makes the sensor's
+    picture, as Photone shows it at rest with the curve straight, as light as the picture the
+    camera put in the file. From `sampled`'s cells and the preview at 640 pixels at most, so
+    it is the same whichever size is developed. None where either is missing."""
+    cells = sampled(raw)
+    theirs = carried(raw) if cells is not None and about is not None else None
+    if theirs is None:
+        return None
+    # (Every second cell each way: the shares come out within 0.001 of all of them, in 4 ms
+    # and not 24. Reading the preview is most of what is left: a Sony's is the whole picture.)
+    ours = edit.tone_at(cells[::2, ::2] @ edit.camera_matrix(about).T,
+                        edit.uniforms({"curve": edit.STRAIGHT}, None, True))
+    return edit.matched(np.clip(edit.lightness(ours), 0, 1),
+                        np.clip(edit.lightness(theirs), 0, 1))
+
+
+def carried(raw) -> np.ndarray | None:
+    """The preview a raw file carries, 640 pixels at most across, as linear Rec.2020 colors
+    (h, w, 3), from its own color space (sRGB where it names none). None where it has none."""
+    import rawpy
+    from PySide6.QtCore import QBuffer, QByteArray, QSize, Qt
+    from PySide6.QtGui import QColorSpace, QImage, QImageReader
+
+    try:
+        found = raw.extract_thumb()
+    except rawpy.LibRawError:
+        return None
+    if found.format == rawpy.ThumbFormat.JPEG:
+        data = QBuffer()
+        data.setData(QByteArray(found.data))
+        data.open(QBuffer.OpenModeFlag.ReadOnly)
+        reader = QImageReader(data, b"jpeg")
+        size = reader.size()
+        if size.isValid() and max(size.width(), size.height()) > 640:
+            reader.setScaledSize(size.scaled(QSize(640, 640), Qt.AspectRatioMode.KeepAspectRatio))
+        image = reader.read()
+    else:  # plain pixels
+        held = np.ascontiguousarray(found.data[..., :3], np.uint8)
+        image = QImage(held.data, held.shape[1], held.shape[0], held.shape[1] * 3,
+                       QImage.Format.Format_RGB888).copy()
+    if image.isNull():
+        return None
+    if not image.colorSpace().isValid():
+        image.setColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgb))
+    image.convertTo(QImage.Format.Format_RGBX16FPx4)
+    image.convertToColorSpace(QColorSpace(QColorSpace.Primaries.Bt2020,
+                                          QColorSpace.TransferFunction.Linear))
+    pixels = np.frombuffer(image.constBits(), np.float16).reshape(image.height(), image.width(), 4)
+    return pixels[..., :3].astype(float)
 
 
 def kept(sizes, half: bool) -> tuple[slice, slice]:

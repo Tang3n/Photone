@@ -344,6 +344,16 @@ def check_edit_values() -> None:
 def check_user_curve() -> None:
     """The tone curve the user draws: through its points, never swinging past one, flat
     outside its end points; and packed for the shader."""
+    # The curve a raw photo starts with (edit.matched): a darker picture of the same thing is
+    # shown as light as the other, and neither end is cut off.
+    theirs = np.random.default_rng(3).beta(2, 3, 20000)
+    ours = theirs ** 1.8
+    made = edit.valid_curve(edit.matched(ours, theirs))
+    shown = np.array([edit.curve_at(made, x) for x in ours])
+    assert abs(np.median(shown) - np.median(theirs)) < 0.01 and np.abs(np.percentile(shown, [25, 90]) - np.percentile(theirs, [25, 90])).max() < 0.02
+    assert made[0] == [0, 0] and made[-1] == [1, 1] and all(b[1] >= a[1] for a, b in pairwise(made))
+    assert edit.matched(ours, np.ones(9)) == edit.STRAIGHT, "a picture all white: nothing to go by"
+    assert abs(edit.lightness([1, 1, 1]) - 1) < 1e-4 and abs(edit.lightness([0.18] * 3) - 0.18 ** (1 / 3)) < 1e-4
     at = edit.curve_at
     assert all(abs(at(edit.STRAIGHT, x / 50) - x / 50) < 1e-12 for x in range(51)), "straight is no change"
     points = [[0.0, 0.0], [0.25, 0.15], [0.6, 0.75], [1.0, 1.0]]
