@@ -252,7 +252,7 @@ vec3 develop(vec3 c) {
     // stops and white taken down one and a half, a milky gray picture. Up, none at white and
     // none eight stops under: both ends stay where they are and what lies between is steeper.
     // Counted in full, it showed all from a stop and a half above mid gray as white.)
-    float lights = contrast < 0.0 ? smoothstep(0.5, 4.5, stops) : smoothstep(0.0, -log2(mid), stops);
+    float lights = smoothstep(contrast < 0.0 ? 0.5 : 0.0, -log2(mid), stops);
     float spread = stops * (1.0 - (stops > 0.0 ? lights : smoothstep(1.0, 8.0, -stops)));
     c *= exp2(contrast * spread + shadows * (1.0 - smoothstep(-4.5, 0.5, stops)) * deep);
     // Highlights: the same kind of gain, none half a stop under mid gray and all of it four

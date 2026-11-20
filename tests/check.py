@@ -866,7 +866,7 @@ def check_tone_settings() -> None:
     assert edit.uniforms({}, None, False)["mid"] == edit.MID_FINISHED, "a finished picture's mid gray"
     more = edit.uniforms({"contrast": 100, "brightness": 100}, None, True)
     less = edit.uniforms({"contrast": -100, "brightness": -100}, None, True)
-    assert more["contrast"] == 0.5 and less["contrast"] == -0.5, "stops from mid gray half as many again, halved"
+    assert more["contrast"] == 0.5 and abs(less["contrast"] + 0.35) < 1e-12, "stops from mid gray half as many again, 0.65 of them"
     assert more["brightness"] == -0.5 and less["brightness"] == 1, "the power on luminance, less one"
     assert rest["whites"] == 0 and rest["blacks"] == 0 and rest["vibrance"] == 0 and rest["look"] == 0 and rest["midtones"] == 0
     assert {"whites", "blacks", "midtones"} <= set(edit.TOOLS["tone"]) and "vibrance" in edit.TOOLS["saturation"]
@@ -893,8 +893,8 @@ def check_tone_even() -> None:
         plain, moved = (edit.uniforms({"exposure": 0.0, **v}, None, True) for v in ({}, {"shadows": shadows}))
         return float(np.log2(edit.tone_at(edit.MID * 2 ** stops, {**moved, "curveC": 0.0}) / edit.tone_at(edit.MID * 2 ** stops, {**plain, "curveC": 0.0})))
     assert lift(-4, 100.0) > 1.2 and abs(lift(-8, 100.0)) < 1e-9 and abs(lift(-8, -100.0) + 1.5) < 1e-9
-    # Contrast down flattens the middle and leaves the two ends: half the contrast round mid
-    # gray, black where it was, the sensor's white less than half a stop down.
+    # Contrast down flattens the middle and leaves the two ends: 0.65 of the contrast round
+    # mid gray at -100, black and the sensor's white where they were.
     def flat(stops: float) -> float:
         plain, moved = (edit.uniforms({"exposure": 0.0, **v}, None, True) for v in ({}, {"contrast": -100.0}))
         return float(np.log2(edit.tone_at(edit.MID * 2 ** stops, {**moved, "curveC": 0.0}) / edit.tone_at(edit.MID * 2 ** stops, {**plain, "curveC": 0.0})))

@@ -840,7 +840,8 @@ def tone_at(x, u: dict):
     # ends stay where they are and what lies between is steeper, half as steep again round
     # mid gray at +100. Counted in full it showed all from a stop and a half above mid gray
     # as white.)
-    far = 1 - np.where(stops > 0, _step(*((0.5, 4.5) if u["contrast"] < 0 else (0.0, -np.log2(gray))), stops), _step(1.0, 8.0, -stops))
+    lights = _step(0.5 if u["contrast"] < 0 else 0.0, -np.log2(gray), stops)
+    far = 1 - np.where(stops > 0, lights, _step(1.0, 8.0, -stops))
     spread = stops * far
     shown = shown * 2.0 ** (u["contrast"] * spread + u["shadows"] * dark)
     stops = np.log2(np.maximum(shown, 1e-6) / gray)
@@ -1282,9 +1283,10 @@ def uniforms(edit: dict, camera: dict | None, raw: bool, white: float = 1.0,  # 
            "toCam": to_cam.tolist(), "fromCam": from_cam.tolist(),
            "mid": MID if raw else MID_FINISHED,
            # Contrast: stops from mid gray are stretched by this much round mid gray (-100
-           # halves them; +100 makes them half as many again: more, with white and black
+           # leaves 0.65 of them, as far as ART's Contrast goes: half was "a little extreme",
+           # the owner; +100 makes them half as many again: more, with white and black
            # staying where they are, would leave the lights under white flat).
-           "contrast": (1.5 if full["contrast"] > 0 else 2.0) ** (full["contrast"] / 100) - 1,
+           "contrast": (1.5 if full["contrast"] > 0 else 1 / 0.65) ** (full["contrast"] / 100) - 1,
            # Brightness: a power on the finished picture's luminance, less one (+100: 0.5).
            "brightness": 2.0 ** (-full["brightness"] / 100) - 1,
            # Highlights: up to 2.4 stops, 1.8 at the sensor's white. The profile shows half the
