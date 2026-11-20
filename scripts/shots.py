@@ -132,10 +132,53 @@ LENS = {"distortion": [round(900 * (n / 15) ** 2) for n in range(16)], "vignetti
         "red": [12000] * 16, "blue": [-12000] * 16}  # figures as a camera writes them, stronger than a lens has
 
 
-def lensed(path: Path, half: bool):
-    """The chart as a raw file of a camera that wrote down its lens's faults (LENS)."""
+def through_sensor(rgb: np.ndarray, red: float = 1.0, blue: float = 1.0, soft: bool = False) -> np.ndarray:
+    """A picture (rows x columns x 3) as a raw file has it: drawn by a lens that draws red and
+    blue that many times larger than green, recorded by a sensor that has one color at each
+    pixel (red, green / green, blue), and made whole again the way raw developers do: green
+    from its neighbors, red and blue as green plus what they differ from it by at their own
+    pixels. So red's and blue's finest detail is green's, which is what the chromatic
+    aberration correction has to reckon with (pipeline.frag, `corrected`).
+    `soft`: by a lens less sharp than the chart, as any is: an edge from one pixel to the next
+    can fall between the pixels that see red, and then nothing tells where red has it, which
+    matters where red is less than a pixel off."""
+    high, wide = rgb.shape[:2]
+    big = np.repeat(np.repeat(rgb, 4, 0), 4, 1)
+    ys, xs = np.indices((4 * high, 4 * wide))
+    drawn = np.empty_like(rgb)
+    for color, larger in enumerate((red, 1.0, blue)):
+        y = np.clip(np.rint((ys + 0.5 - 2 * high) / larger + 2 * high - 0.5), 0, 4 * high - 1).astype(int)
+        x = np.clip(np.rint((xs + 0.5 - 2 * wide) / larger + 2 * wide - 0.5), 0, 4 * wide - 1).astype(int)
+        drawn[..., color] = big[y, x, color].reshape(high, 4, wide, 4).mean(axis=(1, 3))
+    drawn = np.pad(drawn, ((2, 2), (2, 2), (0, 0)), mode="edge")  # (the frame's edge has neighbors too, not the far edge's)
+    ys, xs = np.indices(drawn.shape[:2])
+    reds, blues = (ys % 2 == 0) & (xs % 2 == 0), (ys % 2 == 1) & (xs % 2 == 1)
+
+    def near(values: np.ndarray) -> np.ndarray:  # each pixel and the eight around it, the nearer counting more
+        return sum((1 - abs(dy) / 2) * (1 - abs(dx) / 2) * np.roll(values, (dy, dx), (0, 1)) for dy in (-1, 0, 1) for dx in (-1, 0, 1))
+
+    if soft:
+        drawn = near(drawn) / 4
+
+    def filled(values: np.ndarray, there: np.ndarray) -> np.ndarray:  # known `there` only: everywhere, from the nearest that are
+        return near(values * there) / near(there.astype(np.float32))
+
+    green = np.where(reds | blues, filled(drawn[..., 1], ~(reds | blues)), drawn[..., 1])
+    return np.stack([green + filled(drawn[..., 0] - green, reds), green, green + filled(drawn[..., 2] - green, blues)], axis=-1)[2:-2, 2:-2].astype(np.float32)
+
+
+def sensed_chart(red: float, blue: float, soft: bool = False):
+    """The chart `through_sensor`, as decode.synthetic gives it: (what it is, its pixels)."""
     meta, pixels = decode.synthetic(480, 320)
-    return {**meta, "name": path.name, "camera": {**meta["camera"], "lens": LENS}}, pixels
+    rgb = np.frombuffer(pixels.buf, np.float16).reshape(320, 480, 4)[..., :3].astype(np.float32)
+    return meta, decode.Pixels(decode.pack(through_sensor(rgb, red, blue, soft)))
+
+
+def lensed(path: Path, half: bool):
+    """The chart as a raw file of a camera that wrote down its lens's faults (LENS), with the
+    colored fringes those figures are for in it (`through_sensor`)."""
+    meta, seen = sensed_chart(1 + LENS["red"][0] * 2 ** -21, 1 + LENS["blue"][0] * 2 ** -21)
+    return {**meta, "name": path.name, "camera": {**meta["camera"], "lens": LENS}}, seen
 
 
 def fringed(path: Path, half: bool):
@@ -481,7 +524,7 @@ SHOTS = {
         session.setEdit("lensColor", False), show(root, "lens"))),
     "lens-none": (SMALL, photo, lambda root, session: show(root, "lens")),
     "lens-hand": (BIG, lambda: ui.Session([Path("test chart.arw")], load=lensed), lambda root, session: (
-        session.setEdits({"caRed": 24.0, "caBlue": -12.0, "defringePurple": 60.0}), show(root, "lens"))),
+        session.setEdits({"defringe": 60.0}), show(root, "lens"))),
     "grain": (BIG, photo, lambda root, session: (
         session.setEdits({**edit.CHARACTERS["bold"], "grainSize": 4.0}), show(root, "grain"))),
     "grain-own": (SMALL, photo, lambda root, session: (
@@ -2026,14 +2069,14 @@ def audit_test_chart() -> list[str]:
     faults.expect(not session.panels["chart"] and "1/1/" in session.source, "the next photo opens with the test chart still on")
     ui.close_view(view)
     # The photo's lens corrections are not for the chart, which no lens drew: neither the
-    # camera's figures nor what was set by hand.
+    # camera's figures nor Defringe.
     session = ui.Session([Path("test chart.arw")], load=lensed)
     view, root = opened(session, "")
-    session.setEdits({"caRed": 50.0, "defringePurple": 80.0})
+    session.setEdits({"defringe": 80.0})
     session.commitEdit()
-    faults.expect(session.uniforms["lensOn"] == 1 and session.uniforms["defringePurple"] > 0, "the lens corrections are not on for the photo itself")
+    faults.expect(session.uniforms["lensOn"] == 1 and session.uniforms["defringe"] > 0, "the lens corrections are not on for the photo itself")
     session.setPanel("chart", True)
-    faults.expect(session.uniforms["lensOn"] == 0 and session.uniforms["defringePurple"] == 0, "the photo's lens corrections are applied to the test chart")
+    faults.expect(session.uniforms["lensOn"] == 0 and session.uniforms["defringe"] == 0, "the photo's lens corrections are applied to the test chart")
     session.setPanel("chart", False)
     faults.expect(session.uniforms["lensOn"] == 1, "back on the photo, its lens corrections are gone")
     ui.close_view(view)
@@ -4290,24 +4333,29 @@ def audit_lens() -> list[str]:
     bent = seen()
     green = session.history.edit and edit.uniforms(session.history.edit, session._camera, True, shape=1.5)["lensGreen"]
     want = [where(green, (n + 1) / 8) * wide for n in range(6)]
-    got = steps(bent)
+    got = steps(bent)[:6]  # (read by a curve, a step stays steep enough that the last may be found too)
     off = max(abs(a - b) for a, b in zip(got, want, strict=False)) if len(got) == 6 else 999
     faults.expect(off <= 1.5 and max(abs(a - b) for a, b in zip(got, edges, strict=False)) > 4,
                   f"Distortion: the wedge's steps are at {[round(v) for v in got]}, the figures put them at {[round(v) for v in want]} (they were at {[round(v) for v in edges]})")
     faults.expect(min(bent[2, 2].max(), bent[-3, -3].max(), bent[2, -3].max()) > 8, "Distortion leaves a corner of the frame empty")
     click(view, find(root, "lens:distortion"))
-    # Chromatic aberration: red is read further out and blue further in than green, so on
-    # the right half a step is drawn further in for red and further out for blue.
+    # Chromatic aberration: the lens drew red larger and blue smaller than green (`lensed`),
+    # so on the right half a step lies further out for red and further in for blue, by what
+    # the figures say; corrected, the three are in one place, green where it was, and a
+    # step is as steep as it was (the owner: "making the entire photo a bit soft").
+    near = lambda found, x: min(found, key=lambda at: abs(at - x)) if found else 0.0  # noqa: E731
+    last = lambda shot: [near(steps(shot, color), edges[-1]) for color in (0, 1, 2)]  # noqa: E731 - where the last step is for red, green, blue
+    steep = lambda shot: float(np.diff(shot[int(0.93 * len(shot)) - 3:int(0.93 * len(shot)) + 3].mean(axis=(0, 2)))[int(edges[-1]) - 6:int(edges[-1]) + 6].max())  # noqa: E731 - the most the lightness rises by from one pixel to the next at that step
+    was = last(plain_)
     click(view, find(root, "lens:color"))
     fringed = seen()
-    red, blue, mid = steps(fringed, 0), steps(fringed, 2), steps(fringed, 1)
-    near = lambda found, x: min(found, key=lambda at: abs(at - x)) if found else 0.0  # noqa: E731
-    red, blue, mid = [[near(found, x) for x in edges] for found in (red, blue, mid)]
-    apart = red[-1] - blue[-1]
+    red, mid, blue = last(fringed)
     numbers = edit.uniforms(session.history.edit, session._camera, True, shape=1.5)
-    expect = (where(numbers["lensRed"], 6 / 8) - where(numbers["lensBlue"], 6 / 8)) * wide
-    faults.expect(len(mid) == 6 and abs(mid[-1] - edges[-1]) < 0.6 and abs(apart - expect) < 1.0 and abs(expect) > 2,
-                  f"Chromatic aberration: the last step's red and blue are {apart:.1f} px apart, the figures say {expect:.1f}; green moved {mid[-1] - edges[-1] if len(mid) == 6 else 0:.1f}")
+    expect = (where(numbers["lensBlue"], 6 / 8) - where(numbers["lensRed"], 6 / 8)) * wide
+    faults.expect(abs(was[0] - was[2] - expect) < 1.0 and abs(expect) > 2, f"(the chart's last step: red and blue are {was[0] - was[2]:.1f} px apart as the lens drew them, the figures say {expect:.1f})")
+    faults.expect(abs(mid - edges[-1]) < 0.3 and abs(red - mid) < 0.5 and abs(blue - mid) < 0.5,
+                  f"Chromatic aberration: corrected, the last step's red is {red - mid:.2f} px and its blue {blue - mid:.2f} px from its green, which moved {mid - edges[-1]:.2f}")
+    faults.expect(steep(fringed) > 0.95 * steep(plain_), f"Chromatic aberration: corrected, the last step rises by {steep(fringed):.1f} levels a pixel at most, uncorrected by {steep(plain_):.1f}: softer")
     # The file is the picture on screen, with all three.
     session.resetAll()
     faults.expect(session.history.edit == {} and session.uniforms["lensOn"] == 1, "Reset all does not bring the three corrections back on")
@@ -4355,11 +4403,9 @@ def audit_lens() -> list[str]:
 
 
 def audit_fringes() -> list[str]:
-    """Chromatic aberration by hand, measured in the picture: Defringe takes the purple (or
-    the green) seam off an edge and leaves a purple or green thing that is no edge, and the
-    other color's seam; Red / cyan and Blue / yellow draw that color larger or smaller by
-    what the slider says, for a file that carries no figures of its lens."""
-    from photone import lens
+    """Defringe, measured in the picture, for a file that carries no figures of its lens: it
+    takes the seam of color off an edge, purple or green, and leaves a purple or green thing
+    that is no seam as it is."""
     session = ui.Session([Path("first.png")], load=fringed)
     view, root = opened(session, "lens")
     faults = Faults()
@@ -4376,51 +4422,16 @@ def audit_fringes() -> list[str]:
     seam, thing = part(239, 40, 2, 80), part(70, 50, 40, 40)
     low, lump = part(239, 200, 2, 80), part(70, 230, 40, 40)
     faults.expect(purple(seam) > 60 and green(low) > 60, f"(the photo to try it on: a seam of {seam} and one of {low})")
-    faults.expect(not find(root, "lens:distortion").property("enabled") and find(root, "slider:defringePurple").isVisible(), "a file without figures: the sliders by hand are not there")
-    slider = find(root, "slider:defringePurple")
-    bring(root, "slider:defringePurple")
+    faults.expect(not find(root, "lens:distortion").property("enabled") and find(root, "slider:defringe").isVisible(), "a file without figures: Defringe is not there")
+    slider = find(root, "slider:defringe")
+    bring(root, "slider:defringe")
     track = slider.findChild(QObject, "track")
     drag(view, box(slider.findChild(QObject, "thumb")).center().toPoint(), QPoint(int(track.width()), 0))
-    faults.expect(session.history.edit == {"defringePurple": 100.0}, f"Defringe purple dragged to its end: {session.history.edit}")
-    faults.expect(purple(part(239, 40, 2, 80)) < 0.25 * purple(seam) and abs(purple(part(70, 50, 40, 40)) - purple(thing)) <= 2 and abs(green(part(239, 200, 2, 80)) - green(low)) <= 2,
-                  f"Defringe purple at 100: the seam went from {purple(seam):.0f} to {purple(part(239, 40, 2, 80)):.0f} levels of purple, the purple square from {purple(thing):.0f} to {purple(part(70, 50, 40, 40)):.0f}, the green seam from {green(low):.0f} to {green(part(239, 200, 2, 80)):.0f}")
-    session.setEdits({"defringePurple": 0.0, "defringeGreen": 100.0})
-    settle()
-    faults.expect(green(part(239, 200, 2, 80)) < 0.25 * green(low) and abs(green(part(70, 230, 40, 40)) - green(lump)) <= 2 and abs(purple(part(239, 40, 2, 80)) - purple(seam)) <= 2,
-                  f"Defringe green at 100: the seam went from {green(low):.0f} to {green(part(239, 200, 2, 80)):.0f} levels of green, the green square from {green(lump):.0f} to {green(part(70, 230, 40, 40)):.0f}")
-    # Red drawn larger: the edge of the light half lies further out for red than for green.
-    session.setEdits({"defringeGreen": 0.0, "caRed": 100.0, "caBlue": -100.0})
-    settle()
-    area = box(root.findChild(QObject, "photo"))
-    wait(lambda: False, 60)
-    row = export.bytes_of(view.grabWindow().copy(int(area.left()) + 330, int(area.top()) + 20, 100, 20)).astype(float).mean(axis=0)
-    session.setEdits({"caRed": 0.0, "caBlue": 0.0})
-    settle()
-    wait(lambda: False, 60)
-    was = export.bytes_of(view.grabWindow().copy(int(area.left()) + 330, int(area.top()) + 20, 100, 20)).astype(float).mean(axis=0)
-    faults.expect(np.abs(row - was).max() <= 1, "(far from an edge red and blue by hand change nothing: they should not)")
-    session = None
-    ui.close_view(view)
-    # On the chart, whose wedge has steps to measure by: red and blue apart by what the sliders say.
-    session = ui.Session([Path("first.arw")], load=chart)
-    view, root = opened(session, "lens")
-    area = box(root.findChild(QObject, "photo"))
-
-    def step(channel: int) -> float:  # where the wedge's sixth step begins for that color, in pixels across
-        wait(lambda: False, 60)
-        shot = export.bytes_of(view.grabWindow().copy(area.toRect())).astype(float)
-        row = shot[int(0.93 * len(shot)) - 3:int(0.93 * len(shot)) + 3, :, channel].mean(axis=0)
-        first, last = int(0.72 * len(row)), int(0.78 * len(row))
-        rise = np.clip(np.diff(row[first:last]), 0, None)
-        return first + float((np.arange(len(rise)) * rise).sum() / rise.sum())
-
-    still = step(0), step(2)
-    session.setEdits({"caRed": 100.0, "caBlue": -100.0})
-    settle()
-    moved = step(0) - still[0], step(2) - still[1]
-    out = (0.75 - 0.5) * area.width() * 100 * lens.BY_HAND  # (0.2 % of how far the step is from the middle)
-    faults.expect(abs(moved[0] - out) < 0.5 and abs(moved[1] + out) < 0.5 and out > 0.3,
-                  f"Red / cyan at 100 and Blue / yellow at -100: the step moved {moved[0]:.2f} px for red and {moved[1]:.2f} for blue, where {out:.2f} out and in are due")
+    faults.expect(session.history.edit == {"defringe": 100.0}, f"Defringe dragged to its end: {session.history.edit}")
+    faults.expect(purple(part(239, 40, 2, 80)) < 0.25 * purple(seam) and green(part(239, 200, 2, 80)) < 0.25 * green(low),
+                  f"Defringe at 100: the purple seam went from {purple(seam):.0f} to {purple(part(239, 40, 2, 80)):.0f} levels of purple, the green one from {green(low):.0f} to {green(part(239, 200, 2, 80)):.0f} of green")
+    faults.expect(abs(purple(part(70, 50, 40, 40)) - purple(thing)) <= 2 and abs(green(part(70, 230, 40, 40)) - green(lump)) <= 2,
+                  f"Defringe at 100: the purple square went from {purple(thing):.0f} to {purple(part(70, 50, 40, 40)):.0f} levels of purple, the green one from {green(lump):.0f} to {green(part(70, 230, 40, 40)):.0f} of green: things, no seams")
     faults.extend(audit_layout(view))
     ui.close_view(view)
     return faults

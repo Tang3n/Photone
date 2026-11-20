@@ -82,19 +82,13 @@ def _at_table(table: list, r: float) -> float:
     return table[low] + (table[low + 1] - table[low]) * (x - low)
 
 
-BY_HAND = 2e-5  # what one step of a fringe slider draws red or blue larger by: 0.2 % at 100
-
-
-def tables(found: dict | None, distortion: bool, color: bool, vignetting: bool,  # noqa: PLR0913
-           red: float = 0.0, blue: float = 0.0) -> dict:
+def tables(found: dict | None, distortion: bool, color: bool, vignetting: bool) -> dict:
     """The corrections that are switched on, as the shader takes them: sixteen numbers each,
     at sixteenths of the way from the picture's middle to its corner (the first at 0, the last
     at the corner). `lensGreen`: a pixel at that distance shows what the stored picture has
     this many times further out (distortion; 1: where it is); `lensRed`, `lensBlue`: the same
     for red and for blue, which the lens draws a little larger or smaller than green
     (chromatic aberration); `lensLight`: it is made this many times lighter (vignetting).
-    `red`, `blue`: by hand on top of that (-100..100), for any file: red, or blue, drawn that
-    much larger (below 0: smaller) than green, the same all the way out.
     `lensOn`: whether any of it is anything. With distortion the whole is drawn that much
     larger that the corner still shows the corner: nothing of the frame is left empty."""
     found = found or {}
@@ -113,8 +107,6 @@ def tables(found: dict | None, distortion: bool, color: bool, vignetting: bool, 
         for name, key in (("lensRed", "red"), ("lensBlue", "blue")):
             out[name] = [green * (1 + _at(found[key], r) * 2 ** -21)
                          for green, r in zip(out["lensGreen"], places, strict=True)]
-    out["lensRed"] = [value / (1 + red * BY_HAND) for value in out["lensRed"]]
-    out["lensBlue"] = [value / (1 + blue * BY_HAND) for value in out["lensBlue"]]
     if vignetting and "vignetting" in found:
         out["lensLight"] = [2 ** (2 ** (_at(found["vignetting"], r) * 2 ** -13 - 1) - 0.5)
                             for r in places]

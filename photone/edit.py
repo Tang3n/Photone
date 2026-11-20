@@ -63,7 +63,7 @@ DEFAULTS = {"profile": "standard", "temperature": None, "tint": None,
             # (On until switched off, where the file has the camera's figures: the owner's
             # choice, "i think all should be switched on by default".)
             "lensDistortion": True, "lensColor": True, "lensVignetting": True,
-            "caRed": 0.0, "caBlue": 0.0, "defringePurple": 0.0, "defringeGreen": 0.0,
+            "defringe": 0.0,
             "grain": 0.0, "grainSize": 1.0, "grainRough": 50.0, "grainColor": 0.0,
             "grainCurve": RESPONSES["print"],
             "turns": 0.0, "angle": 0.0, "crop": [0.0, 0.0, 1.0, 1.0], "masks": []}
@@ -74,8 +74,7 @@ RANGES = {"temperature": (2000.0, 15000.0), "tint": (-150.0, 150.0), "exposure":
           "saturation": (0.0, 200.0), "turns": (0.0, 3.0), "angle": (-15.0, 15.0),
           "sharpen": (0.0, 150.0), "sharpenRadius": (0.5, 3.0), "sharpenMask": (0.0, 100.0),
           "denoise": (0.0, 100.0), "denoiseColor": (0.0, 100.0),
-          "caRed": (-100.0, 100.0), "caBlue": (-100.0, 100.0),
-          "defringePurple": (0.0, 100.0), "defringeGreen": (0.0, 100.0),
+          "defringe": (0.0, 100.0),
           "grain": (0.0, 100.0), "grainSize": (0.4, 4.0), "grainRough": (0.0, 100.0),
           "grainColor": (0.0, 100.0)}
 # The photo's frame: quarter turns to the right, an angle (degrees) that turns the picture to
@@ -91,8 +90,7 @@ TOOLS = {"tone": ("profile", "exposure", "contrast", "brightness", "highlights",
          "grain": ("grain", "grainSize", "grainRough", "grainColor", "grainCurve"),
          "lut": ("luts",),
          "detail": ("sharpen", "sharpenRadius", "sharpenMask", "denoise", "denoiseColor"),
-         "lens": ("lensDistortion", "lensColor", "lensVignetting", "caRed", "caBlue",
-                  "defringePurple", "defringeGreen"),
+         "lens": ("lensDistortion", "lensColor", "lensVignetting", "defringe"),
          "mono": ("bw",),  # (the look; black and white itself is a switch, no tool's setting)
          "crop": FRAME}
 POINTS = 16     # of a tone curve: what the shader's three matrices hold
@@ -1271,11 +1269,10 @@ def uniforms(edit: dict, camera: dict | None, raw: bool, white: float = 1.0,  # 
            **luts_uniforms(full["luts"]), **detail_uniforms(full, shape, wide),
            # Lens corrections, from the camera's own figures where the file had them.
            **lens.tables((camera or {}).get("lens"), full["lensDistortion"], full["lensColor"],
-                         full["lensVignetting"], full["caRed"], full["caBlue"]),
+                         full["lensVignetting"]),
            "lensShape": shape if shape > 0 else 1.0,
-           # Fringes taken out by their color, at edges (the shader's `defringed`): how much.
-           "defringePurple": full["defringePurple"] / 100 if wide > 0 else 0.0,
-           "defringeGreen": full["defringeGreen"] / 100 if wide > 0 else 0.0,
+           # Fringes of color taken off edges (the shader's `defringed`): how much.
+           "defringe": full["defringe"] / 100 if wide > 0 else 0.0,
            **masks_uniforms(full["masks"], shape), **over_uniforms(edit.get("over", {}))}
     if full["mono"]:  # (a mask's own chroma curve and EQ have nothing to work on)
         out["chroma2On"] = out["eq2Count"] = 0.0

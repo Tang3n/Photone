@@ -653,15 +653,11 @@ def check_lens() -> None:
     whole = edit.uniforms({}, {**edit.FINISHED, "lens": found}, False, shape=1.5)
     assert whole["lensOn"] == 1 and whole["lensRed"] != whole["lensGreen"] == bent["lensGreen"], "all three are on until switched off"
     assert edit.uniforms({}, None, True)["lensOn"] == 0, "no figures: nothing is done, whatever is switched on"
-    # By hand, for any file: red and blue drawn larger or smaller, on top of the figures.
-    hand = lens.tables(None, True, True, True, 50.0, -100.0)
-    assert hand["lensOn"] == 1 and hand["lensGreen"] == [1.0] * 16 and abs(hand["lensRed"][7] - 1 / 1.001) < 1e-12 and abs(hand["lensBlue"][7] - 1 / 0.998) < 1e-12
-    both = lens.tables(found, False, True, False, 50.0)
-    assert abs(both["lensRed"][5] - fringed["lensRed"][5] / 1.001) < 1e-12 and both["lensBlue"] == fringed["lensBlue"]
-    u = edit.uniforms({"caRed": 50.0, "defringePurple": 40.0, "defringeGreen": 100.0}, None, True, shape=1.5, wide=6000)
-    assert u["lensOn"] == 1 and u["lensRed"] == hand["lensRed"] and u["defringePurple"] == 0.4 and u["defringeGreen"] == 1
-    assert edit.uniforms({"defringePurple": 40.0}, None, True)["defringePurple"] == 0, "without the picture's size: no defringe"
-    assert set(edit.TOOLS["lens"]) == {"lensDistortion", "lensColor", "lensVignetting", "caRed", "caBlue", "defringePurple", "defringeGreen"}
+    # Defringe, for any file: a share of 1, and nothing of it without the picture's size.
+    assert edit.uniforms({"defringe": 40.0}, None, True, shape=1.5, wide=6000)["defringe"] == 0.4
+    assert edit.uniforms({"defringe": 40.0}, None, True)["defringe"] == 0, "without the picture's size: no defringe"
+    assert set(edit.TOOLS["lens"]) == {"lensDistortion", "lensColor", "lensVignetting", "defringe"}
+    assert edit.clean({"defringe": 30, "caRed": 50.0, "defringePurple": 40.0}) == {"defringe": 30.0}, "the sliders there were before are not known any more"
     assert edit.clean({"lensDistortion": True, "lensColor": "yes", "lensVignetting": False}) == {"lensVignetting": False}
 
 

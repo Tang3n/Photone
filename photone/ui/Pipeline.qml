@@ -120,8 +120,7 @@ ShaderEffect {
     property matrix4x4 lensRed: used.lensRed
     property matrix4x4 lensBlue: used.lensBlue
     property matrix4x4 lensLight: used.lensLight
-    property real defringePurple: used.defringePurple
-    property real defringeGreen: used.defringeGreen
+    property real defringe: used.defringe
     fragmentShader: pipelineShader
     vertexShader: pipelineVertex
 }

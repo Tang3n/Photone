@@ -114,8 +114,7 @@ layout(std140, binding = 0) uniform buf {
     mat4 lensRed;     // how many times further out the stored picture is read, for green, red
     mat4 lensBlue;    // and blue (distortion, chromatic aberration),
     mat4 lensLight;   // and how many times lighter a pixel is made (vignetting).
-    float defringePurple; // Fringes at edges taken out by their color (`defringed`): how much of the
-    float defringeGreen;  // purple ones, and of the green ones.
+    float defringe;   // Fringes of color at edges taken off (`defringed`): how much, 0 to 1.
 };
 layout(binding = 1) uniform sampler2D source;  // the first picture, with mipmaps
 // The full-size picture. Bound from the moment it arrives, used or not, so that the GPU
@@ -344,26 +343,91 @@ vec2 squarely(sampler2D picture, vec2 place) {
     return (first + 0.5 + across) / size;
 }
 
+// The picture at a place between its pixels, where distortion reads it: by a curve through
+// the four pixels nearest each way (Catmull-Rom; nine reads, each of them the GPU's mean of
+// two by two). The GPU's own straight line between two pixels is a blur, at its worst half
+// way between them. At a pixel's middle it is that pixel, untouched.
+vec3 keenly(sampler2D picture, vec2 place) {
+    vec2 size = vec2(textureSize(picture, 0));
+    vec2 at = place * size - 0.5, first = floor(at), f = at - first;
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (1.5 * f - 2.5);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (0.5 * f - 0.5);
+    vec2 w12 = w1 + w2;
+    vec2 p0 = (first - 0.5) / size, p12 = (first + 0.5 + w2 / w12) / size, p3 = (first + 2.5) / size;
+    return (textureLod(picture, vec2(p0.x, p0.y), 0.0).rgb * w0.x + textureLod(picture, vec2(p12.x, p0.y), 0.0).rgb * w12.x + textureLod(picture, vec2(p3.x, p0.y), 0.0).rgb * w3.x) * w0.y
+         + (textureLod(picture, vec2(p0.x, p12.y), 0.0).rgb * w0.x + textureLod(picture, vec2(p12.x, p12.y), 0.0).rgb * w12.x + textureLod(picture, vec2(p3.x, p12.y), 0.0).rgb * w3.x) * w12.y
+         + (textureLod(picture, vec2(p0.x, p3.y), 0.0).rgb * w0.x + textureLod(picture, vec2(p12.x, p3.y), 0.0).rgb * w12.x + textureLod(picture, vec2(p3.x, p3.y), 0.0).rgb * w3.x) * w3.y;
+}
+
+// The picture's green there without its finest detail: the mean of three by three pixels,
+// the middle ones counting most (four reads, each the GPU's mean of two by two).
+float evenly(sampler2D picture, vec2 place) {
+    vec2 px = 0.5 / vec2(textureSize(picture, 0));
+    return 0.25 * (textureLod(picture, place + px, 0.0).g + textureLod(picture, place - px, 0.0).g
+                   + textureLod(picture, place + vec2(px.x, -px.y), 0.0).g + textureLod(picture, place + vec2(-px.x, px.y), 0.0).g);
+}
+
+// The picture with its lens corrected: green from `here`, red and blue from where the lens
+// drew them. A sensor has red at one pixel in four, and so blue: what a raw file's picture
+// has of fine detail in red and in blue was made from green's, and lies where green's does.
+// Read whole from its own place, a color took that detail along, off green's: a second,
+// displaced outline in two of the three colors (the owner: "making the entire photo a bit
+// soft"; on eight of his files, seen at 100 %, the fine detail away from the middle was
+// 0.63 of what it is uncorrected, now 0.98). So only what the color differs from green by is
+// read from its place, and green's coarse part with it; the fine detail stays green's, here.
+// `far`: seen from far, where several pixels go into one, each color plainly from its place.
+vec3 corrected(sampler2D picture, vec2 red, vec2 here, vec2 blue, bool far) {
+    if (far) return vec3(texture(picture, red).r, texture(picture, here).g, texture(picture, blue).b);
+    // (Squares, `crisp`: each place is a pixel's middle already.)
+    vec3 c = crisp > 0.5 ? textureLod(picture, here, 0.0).rgb : keenly(picture, here);
+    if (red == here && blue == here) return c;
+    float even = evenly(picture, here);
+    vec3 r = textureLod(picture, red, 0.0).rgb, b = textureLod(picture, blue, 0.0).rgb;
+    if (red != here) c.r = c.g + r.r - r.g + evenly(picture, red) - even;
+    if (blue != here) c.b = c.g + b.b - b.g + evenly(picture, blue) - even;
+    return c;
+}
+
 const vec3 THIRD = vec3(1.0 / 3.0);
 
-// Fringes: the purple (or green) seam a lens draws along an edge between dark and light.
-// Where the pixels three away differ much in lightness (an edge), what the pixel has of
-// purple (red and blue both above green) or of green (green above both) is taken out, as
-// much as asked; a purple or green thing that is no edge keeps its color. In the square
-// root of the light, as `detailed`.
-vec3 defringed(sampler2D tex, vec2 at, vec3 centre, float much) {
+// Fringes: the seam of color a lens draws along an edge between dark and light, of any color
+// (blue or purple on the dark side, yellow on the light one, cyan and red where red lies a
+// little off, green). What tells a fringe from a thing of that color is that it is alone:
+// the picture around it, taken together, is not of its color, and few of its neighbors are.
+// So a pixel's color (what red, green and blue are of its lightness) is set against that of
+// sixteen neighbors, seven and sixteen pixels out: where it is far from their mean, where
+// fewer than a third of them are like it, and where there is an edge among them, it takes
+// their mean color, as much as asked, and keeps its lightness. A purple flower has purple
+// around it and stays as it is; so does a blue sky beside a white wall (half of what is
+// around it is sky), and anything where there is no edge. In the square root of the light,
+// as `detailed`.
+// `reach`: how many of the photo's pixels one pixel of the screen covers: seen from far the
+// neighbors are a pixel of the screen away at the least, so that a fringe is taken off at
+// any zoom and not only where sharpening is done.
+vec3 defringed(sampler2D tex, vec2 at, vec3 centre, float reach) {
     vec2 px = vec2(detailX, detailY);
+    float near = max(7.0, reach), far = max(16.0, 2.0 * reach);
     vec3 s = sqrt(max(centre, 0.0));
-    float y0 = dot(s, THIRD), low = y0, high = y0;
-    for (int i = 0; i < 8; i++) {
-        float turn = float(i) * 0.7853982;
-        float y = dot(sqrt(max(texture(tex, at + 3.0 * vec2(cos(turn), sin(turn)) * px).rgb, 0.0)), THIRD);
+    float y0 = max(dot(s, THIRD), 1e-4), low = y0, high = y0;
+    vec3 own = s / y0, mean = vec3(0.0);
+    vec3 colors[16];
+    for (int i = 0; i < 16; i++) {  // (eight ways, near, and eight between them, far)
+        float turn = (float(i) + (i < 8 ? 0.0 : 0.5)) * 0.7853982;
+        vec3 n = sqrt(max(texture(tex, at + (i < 8 ? near : far) * vec2(cos(turn), sin(turn)) * px).rgb, 0.0));
+        float y = max(dot(n, THIRD), 1e-4);
         low = min(low, y); high = max(high, y);
+        colors[i] = n / y;
+        mean += colors[i] / 16.0;
     }
-    float edge = smoothstep(0.08, 0.25, high - low) * much;
-    float purple = max(min(s.r, s.b) - s.g, 0.0), green = max(s.g - max(s.r, s.b), 0.0);
-    s.rb -= defringePurple * edge * purple;
-    s.g -= defringeGreen * edge * green;
+    float apart = length(own - mean), alike = 0.0;
+    for (int i = 0; i < 16; i++) alike += (1.0 - smoothstep(0.4 * apart, 0.8 * apart, length(colors[i] - own))) / 16.0;
+    // (And only where that mean is less of a color than the pixel is: a fringe lies on what
+    // is less colored than itself. A green gap between a thistle's purple strands would
+    // else take their purple; on the owner's thistle this alone took 39 % off what changed.)
+    float much = defringe * smoothstep(0.05, 0.15, apart) * (1.0 - smoothstep(0.2, 0.4, alike))
+                 * smoothstep(0.08, 0.25, 1.0 - low / high) * smoothstep(0.05, 0.3, (high - y0) / max(high - low, 1e-4))
+                 * smoothstep(0.0, 0.3, 1.0 - length(mean - 1.0) / max(length(own - 1.0), 1e-4));
+    s = y0 * mix(own, mean, much);
     return s * s;
 }
 
@@ -480,34 +544,42 @@ void main() {
         here = 0.5 + (qt_TexCoord0 - 0.5) * green;
         lighter = lensAt(lensLight, r);
         vec2 red = 0.5 + (qt_TexCoord0 - 0.5) * lensAt(lensRed, r), blue = 0.5 + (qt_TexCoord0 - 0.5) * lensAt(lensBlue, r);
-        // (Seen from close, the photo's own pixels as squares here too: each of the three
-        // places is the middle of the pixel it lies in. Left out, a corrected photo was
-        // smooth at any zoom; the owner: "i can no longer see pixels at 200%+ zoom".)
+        // (Seen from close, the photo's own pixels as squares here too: green's place is the
+        // middle of the pixel it lies in. Left out, a corrected photo was smooth at any zoom;
+        // the owner: "i can no longer see pixels at 200%+ zoom". Red and blue are read as far
+        // from there as they were from green, parts of a pixel and all: each put in the middle
+        // of its own pixel, they were up to half a pixel off, a colored pixel along an edge;
+        // the owner: "ever so slightly misaligned when zoomed in fully".)
         if (crisp > 0.5) {
-            if (useSharp > 0.5) { red = squarely(sharp, red); here = squarely(sharp, here); blue = squarely(sharp, blue); }
-            else { red = squarely(source, red); here = squarely(source, here); blue = squarely(source, blue); }
+            vec2 redOff = red - here, blueOff = blue - here;   // (nothing where nothing is corrected: `corrected` asks)
+            here = useSharp > 0.5 ? squarely(sharp, here) : squarely(source, here);
+            red = here + redOff; blue = here + blueOff;
         }
-        if (useSharp > 0.5) pixel = vec3(texture(sharp, red).r, texture(sharp, here).g, texture(sharp, blue).b);
-        else pixel = vec3(texture(source, red).r, texture(source, here).g, texture(source, blue).b);
+        vec2 covered = fwidth(qt_TexCoord0);
+        if (useSharp > 0.5) pixel = corrected(sharp, red, here, blue, max(covered.x * float(textureSize(sharp, 0).x), covered.y * float(textureSize(sharp, 0).y)) > 1.5);
+        else pixel = corrected(source, red, here, blue, max(covered.x * float(textureSize(source, 0).x), covered.y * float(textureSize(source, 0).y)) > 1.5);
     } else {
         // (`here` is then the place sharpening and noise reduction read the neighbors from:
         // the pixel's middle, so that all of a square is one color.)
         if (crisp > 0.5) here = useSharp > 0.5 ? squarely(sharp, here) : squarely(source, here);
         pixel = useSharp > 0.5 ? texture(sharp, here).rgb : texture(source, here).rgb;
     }
-    bool fringes = defringePurple > 0.0 || defringeGreen > 0.0;
+    bool fringes = defringe > 0.0;
     if (fringes || sharpen > 0.0 || denoise > 0.0 || denoiseColor > 0.0) {
         // (All of it where a pixel of the photo is a pixel of the screen or larger; none
         // where two or more of them go into one.)
         vec2 covered = fwidth(qt_TexCoord0) / vec2(detailX, detailY);
         float much = clamp(2.0 - max(covered.x, covered.y), 0.0, 1.0);
-        if (much > 0.0 && fringes) {
-            if (useSharp > 0.5) pixel = defringed(sharp, here, pixel, much);
-            else pixel = defringed(source, here, pixel, much);
-        }
         if (much > 0.0 && (sharpen > 0.0 || denoise > 0.0 || denoiseColor > 0.0)) {
             if (useSharp > 0.5) pixel = detailed(sharp, here, pixel, much);
             else pixel = detailed(source, here, pixel, much);
+        }
+        // (After noise reduction, which takes a pixel's color from its neighbors as the
+        // picture has them, fringes and all: done before it, it was undone by it.)
+        if (fringes) {
+            float reach = max(max(covered.x, covered.y), 1.0);
+            if (useSharp > 0.5) pixel = defringed(sharp, here, pixel, reach);
+            else pixel = defringed(source, here, pixel, reach);
         }
     }
     pixel *= lighter;

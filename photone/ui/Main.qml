@@ -2062,17 +2062,13 @@ Rectangle {
                     text: lensPanel.any ? "By the camera's own figures for the lens that was on it, which the raw file carries: straight lines straight, no colored fringes toward the corners, corners as light as the middle."
                                         : "This photo's file carries no figures for its lens. Raw files of Sony cameras do."
                 }
-                // By hand, for any file: what is left of the fringes after the camera's
-                // figures, or all of them where a file has none.
-                Label { height: 34; verticalAlignment: Text.AlignBottom; bottomPadding: 4; text: "FRINGES BY HAND"; font.pixelSize: Theme.smallSize; font.weight: Font.DemiBold; font.letterSpacing: 0.9; color: Theme.dim }
-                EditSlider { key: "caRed"; name: "Red / cyan"; from: -100; to: 100; step: 1; digits: 0 }
-                EditSlider { key: "caBlue"; name: "Blue / yellow"; from: -100; to: 100; step: 1; digits: 0 }
-                Item { width: 1; height: 16 }
-                EditSlider { key: "defringePurple"; name: "Defringe purple"; from: 0; to: 100; step: 1; digits: 0; signed: false }
-                EditSlider { key: "defringeGreen"; name: "Defringe green"; from: 0; to: 100; step: 1; digits: 0; signed: false }
+                // For any file: the seams of color a lens leaves along edges, whatever the
+                // camera's figures took off, or all of them where a file has none.
+                Label { height: 34; verticalAlignment: Text.AlignBottom; bottomPadding: 4; text: "DEFRINGE"; font.pixelSize: Theme.smallSize; font.weight: Font.DemiBold; font.letterSpacing: 0.9; color: Theme.dim }
+                EditSlider { key: "defringe"; name: "Amount"; from: 0; to: 100; step: 1; digits: 0; signed: false }
                 Label {
                     width: parent.width; height: implicitHeight + 10; verticalAlignment: Text.AlignBottom; wrapMode: Text.WordWrap; font.pixelSize: 12; color: Theme.faint
-                    text: "Red / cyan and Blue / yellow draw that color a little larger or smaller than the rest, until an edge near a corner has no seam of it. Defringe takes the purple or green seam off edges between dark and light; seen at 100 % and closer."
+                    text: "Takes the seam of color off edges between dark and light: blue, purple, yellow, cyan or green. A thing of such a color keeps it."
                 }
             }
             // Film grain, last of all, as it is laid on the picture last: a character to start
