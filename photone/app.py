@@ -75,6 +75,12 @@ NO_HDR = ("HDR is not available here: this desktop or display did not give the w
           "surface. Showing SDR.")
 
 
+def file_named(name: str) -> str:
+    """An installed LUT's name as the file it came from, extension and all. Those installed
+    before .clf files could be (2026-11-20) came from .cube files and were named without it."""
+    return name if name.lower().endswith((".cube", ".clf")) else name[:75] + ".cube"
+
+
 def small_copy(meta: dict, buf) -> np.ndarray:
     """A photo's pixels thinned to about 500 across, linear Rec.2020 as decoded: what "pick
     neutral" reads a color from."""
@@ -389,7 +395,8 @@ class Session(QObject):
                 read = self._read(file.stem) if file.stem not in found else None
                 if read:
                     self._stale = True
-                    found[file.stem] = {"id": file.stem, "name": lut.title(read[0]) or file.stem,
+                    named = file_named(lut.title(read[0]) or file.stem)
+                    found[file.stem] = {"id": file.stem, "name": named,
                                         "size": len(read[1]), "print": lut.fingerprint(read[1]),
                                         "also": [lut.written(read[0])]}
             self._installed = sorted(found.values(), key=lambda one: one["name"].lower())
@@ -426,8 +433,10 @@ class Session(QObject):
                     read = self._read(had["id"], parsed=not told)
                     told, also = told or lut.fingerprint(read[1]), [lut.written(read[0])]
                 also = [str(name) for name in also if str(name).isalnum()][:8]
+                named = file_named(had["name"])
+                self._stale |= named != had["name"]  # (written down with it, once)
                 if (self.luts / f"{had['id']}.cube").is_file():
-                    found.append({"id": had["id"], "name": had["name"], "size": had["size"],
+                    found.append({"id": had["id"], "name": named, "size": had["size"],
                                   "print": str(told), "also": also})
         return found
 
@@ -464,11 +473,11 @@ class Session(QObject):
         return self._shelf()
 
     def _install(self, path: Path) -> dict:
-        """Take a .cube file in: a copy is kept under what its table holds (lut.fingerprint),
-        so nothing hangs on where the file was. One whose table is installed already, under
-        whatever name and however its file is written, is not installed again: `twice` then
-        names the file and the one that is there. The LUT as the list has it, or ValueError
-        saying what is wrong."""
+        """Take a .cube or .clf file in: a copy is kept under what its table holds
+        (lut.fingerprint), so nothing hangs on where the file was. One whose table is
+        installed already, under whatever name and however its file is written, is not
+        installed again: `twice` then names the file and the one that is there. The LUT as
+        the list has it, or ValueError saying what is wrong."""
         try:
             if path.stat().st_size > lut.BYTES:
                 raise ValueError("the file is too large to be a LUT")
@@ -485,18 +494,20 @@ class Session(QObject):
                 return there
             self.luts.mkdir(parents=True, exist_ok=True)
             part = self.luts / f"{name}.part"
-            part.write_text(text, "utf-8")
+            # (A .clf file's table is kept as a .cube: all that reads it after reads those.)
+            clf = path.suffix.lower() == ".clf"
+            part.write_text(lut.cube(table, path.stem + ".clf") if clf else text, "utf-8")
             os.replace(part, self.luts / f"{name}.cube")
         except OSError as trouble:
             raise ValueError(str(trouble)) from trouble
-        one = {"id": name, "name": path.stem[:80], "size": len(table), "print": name,
-               "also": [other]}
+        one = {"id": name, "name": path.stem[:75] + (".clf" if clf else ".cube"),
+               "size": len(table), "print": name, "also": [other]}
         self._listed([*self._shelf(), one])
         return one
 
     @Slot("QVariantList")
     def installLuts(self, files: list) -> None:  # noqa: N802
-        """Install these .cube files (URLs or paths). Says which could not be used."""
+        """Install these .cube or .clf files (URLs or paths). Says which could not be used."""
         paths = [Path(QUrl(f).toLocalFile() if "://" in str(f) else str(f)) for f in
                  (f.toString() if isinstance(f, QUrl) else f for f in files)]
         said, self.twice = [], []
@@ -567,7 +578,7 @@ class Session(QObject):
 
     @Slot(str)
     def importLut(self, file: str) -> None:  # noqa: N802
-        """A .cube file dropped on the photo: installed, and laid on the open photo."""
+        """A .cube or .clf file dropped on the photo: installed, and laid on the open photo."""
         path = Path(QUrl(file).toLocalFile() if "://" in file else file)
         if not self.photos:
             return self.say("Open a photo first: a LUT is laid on a photo.")
@@ -896,19 +907,17 @@ class Session(QObject):
 
     @Slot("QVariant")
     def open(self, files) -> None:
-        """Files chosen in the dialog or dropped on the window (URLs or paths). A .cube among
-        them is a LUT for the open photo, not a photo."""
+        """Files chosen in the dialog or dropped on the window (URLs or paths). A .cube or .clf
+        among them is a LUT for the open photo, not a photo."""
         paths = [Path(QUrl(f).toLocalFile() if "://" in str(f) else str(f)) for f in
                  (f.toString() if isinstance(f, QUrl) else f for f in files)]
         paths = [p for p in paths if p.is_file()]
         if not paths:
             return self.say("None of these files could be found.")
-        tables = [p for p in paths if p.suffix.lower() == ".cube"]
+        tables = [p for p in paths if p.suffix.lower() in (".cube", ".clf")]
         if tables:
             return [self.importLut(str(table)) for table in tables] and None
-        self.photos = paths
-        self._relisted()
-        self._show(0)
+        self._listed_anew(paths, 0)
 
     @Slot("QVariantList", int)
     def openAt(self, files: list, index: int) -> None:  # noqa: N802

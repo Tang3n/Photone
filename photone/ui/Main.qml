@@ -1314,7 +1314,7 @@ Rectangle {
                     neutral: session.shot.tint
                 }
             }
-            // LUTs: looks made elsewhere, as .cube files. Those installed in Photone are listed
+            // LUTs: looks made elsewhere, as .cube (or .clf) files. Those installed in Photone are listed
             // under "Installed"; one is laid on the photo by dragging it into the photo's list,
             // to the place it is to have there (the owner: "what if i could just drag it out
             // into the list"). Those on the photo are
@@ -1590,7 +1590,7 @@ Rectangle {
                     Label {
                         visible: session.lutsInstalled.length === 0
                         anchors.centerIn: parent; width: parent.width - 30; horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap
-                        text: "None installed yet. Install .cube files, or drop one on the photo."; color: Theme.faint; font.pixelSize: 12
+                        text: "None installed yet. Install .cube or .clf files, or drop one on the photo."; color: Theme.faint; font.pixelSize: 12
                     }
                 }
                 Rectangle {   // the one being dragged, under the pointer, over everything
@@ -2600,7 +2600,7 @@ Rectangle {
         id: lutOpener
         title: "Install LUTs"
         fileMode: FileDialog.OpenFiles
-        nameFilters: ["LUTs (*.cube)", "All files (*)"]
+        nameFilters: ["LUTs (*.cube *.clf)", "All files (*)"]
         onAccepted: { session.installLuts(selectedFiles); root.forceActiveFocus() }
         onRejected: root.forceActiveFocus()
     }

@@ -3487,7 +3487,7 @@ def audit_presets() -> list[str]:
 
 def audit_lut() -> list[str]:
     """LUTs installed in Photone and laid on a photo, with a real mouse, measured in the
-    picture: installing .cube files (one that is none costs a sentence, one that is there
+    picture: installing .cube and .clf files (one that is none costs a sentence, one that is there
     already is not there twice), an installed one dragged into the photo's list is laid on
     at the place it is let go (a mere press on it does nothing); one that changes nothing changes nothing, one of opposites and
     one that swaps red and blue do exactly that, one after the other; Strength, the eye, the
@@ -3501,8 +3501,12 @@ def audit_lut() -> list[str]:
     faults = Faults()
     folder = Path(tempfile.mkdtemp(prefix="photone-lut-", dir=SHELF.name))
     same = lut.identity(9)
-    for name, table in (("Same", lut.identity(17)), ("Opposite", 1 - same), ("Swapped", same[..., ::-1])):
+    for name, table in (("Same", lut.identity(17)), ("Opposite", 1 - same)):
         (folder / f"{name}.cube").write_text(lut.cube(table, name), "utf-8")
+    # (The one that swaps red and blue as a .clf file: XML, blue running fastest.)
+    rows = "\n".join(" ".join(map(str, row)) for row in same[..., ::-1].transpose(2, 1, 0, 3).reshape(-1, 3).tolist())
+    (folder / "Swapped.clf").write_text('<?xml version="1.0"?>\n<ProcessList id="s" compCLFversion="3.0"><LUT3D inBitDepth="32f" '
+                                        f'outBitDepth="32f"><Array dim="9 9 9 3">\n{rows}\n</Array></LUT3D></ProcessList>\n', "utf-8")
     (folder / "Broken.cube").write_text("LUT_3D_SIZE 4\n0 0 0\n", "utf-8")
     area = box(root.findChild(QObject, "photo"))
     spots = [QPoint(int(area.left() + u * area.width()), int(area.top() + v * area.height()))
@@ -3540,30 +3544,30 @@ def audit_lut() -> list[str]:
     plain_ = seen()
     inside = ((plain_ > 6) & (plain_ < 249)).all(axis=1)  # (not cut off by the screen's own range)
     faults.expect(inside.sum() >= 8 and session.lutsInstalled == [], f"(only {inside.sum()} spots can be compared, or LUTs are installed already)")
-    session.installLuts([str(folder / f"{name}.cube") for name in ("Same", "Opposite", "Broken", "Swapped")])
-    faults.expect([one["name"] for one in session.lutsInstalled] == ["Opposite", "Same", "Swapped"] and "Broken.cube cannot be used as a LUT" in session.error
+    session.installLuts([str(folder / name) for name in ("Same.cube", "Opposite.cube", "Broken.cube", "Swapped.clf")])
+    faults.expect([one["name"] for one in session.lutsInstalled] == ["Opposite.cube", "Same.cube", "Swapped.clf"] and "Broken.cube cannot be used as a LUT" in session.error
                   and names() == [], f"installed: {[one['name'] for one in session.lutsInstalled]}, said {session.error!r}, on the photo {names()}")
     # The same table again, in a file of another name and written otherwise: not twice.
     (folder / "Copy of it.cube").write_text("# a copy\r\n" + lut.cube(1 - same, "Renamed").replace("\n", "\r\n"), "utf-8")
     session.installLuts([str(folder / "Copy of it.cube"), str(folder / "Same.cube")])
-    faults.expect(len(session.lutsInstalled) == 3 and "Copy of it.cube is installed already, as “Opposite”" in session.error and "Same.cube is installed already" in session.error
+    faults.expect(len(session.lutsInstalled) == 3 and "Copy of it.cube is installed already, as “Opposite.cube”" in session.error and "Same.cube is installed already" in session.error
                   and len(list(ui.Session.luts_home.glob("*.cube"))) == 3, f"a LUT installed twice: {[one['name'] for one in session.lutsInstalled]}, said {session.error!r}")
     session.say("")
     steps = session.steps
-    click(view, shelf_row("Same"))
+    click(view, shelf_row("Same.cube"))
     faults.expect(names() == [] and session.steps == steps, f"a mere press on an installed LUT laid it on: {names()}")
-    row = box(shelf_row("Same"))
+    row = box(shelf_row("Same.cube"))
     drag(view, row.center().toPoint(), QPoint(0, 60))
     faults.expect(names() == [] and not find(root, "lut-carried").isVisible(), f"an installed LUT let go beside the photo's list: {names()}")
-    lay("Same")
-    faults.expect(names() == ["Same"] and session.steps == steps + 1 and find(root, "lut-item:0") is not None and not find(root, "lut-carried").isVisible(),
+    lay("Same.cube")
+    faults.expect(names() == ["Same.cube"] and session.steps == steps + 1 and find(root, "lut-item:0") is not None and not find(root, "lut-carried").isVisible(),
                   f"an installed LUT dragged into the photo's list: {names()} in {session.steps - steps} steps")
     off = np.abs(seen() - plain_)[inside].max()
     faults.expect(off <= 1, f"a LUT that changes nothing changed the picture by up to {off} levels")
-    lay("Opposite")
+    lay("Opposite.cube")
     turned = seen()
     off = np.abs(turned - (255 - plain_))[inside].max()
-    faults.expect(names() == ["Same", "Opposite"] and off <= 2, f"a LUT of opposites after it: up to {off} levels from the opposite color")
+    faults.expect(names() == ["Same.cube", "Opposite.cube"] and off <= 2, f"a LUT of opposites after it: up to {off} levels from the opposite color")
     slider = find(root, "slider:lut")
     track = slider.findChild(QObject, "track")
     drag(view, box(slider.findChild(QObject, "thumb")).center().toPoint(), QPoint(-round(0.5 * (track.width() - 12)), 0))
@@ -3574,19 +3578,19 @@ def audit_lut() -> list[str]:
                   and np.abs(half - turned)[inside].max() > 20, f"the chosen LUT at half strength ({much}): the picture is not between the two")
     session.undo()
     click(view, find(root, "lut-eye:1"))
-    faults.expect(names() == ["Same", "Opposite off"] and np.abs(seen() - plain_)[inside].max() <= 1, f"the eye does not switch a LUT off: {names()}")
+    faults.expect(names() == ["Same.cube", "Opposite.cube off"] and np.abs(seen() - plain_)[inside].max() <= 1, f"the eye does not switch a LUT off: {names()}")
     click(view, find(root, "lut-eye:1"))
     # While it is held over the list, the rows below its place stand a row lower: a gap for it.
-    row, into, shown_ = box(shelf_row("Swapped")), box(find(root, "lut-list")), []
+    row, into, shown_ = box(shelf_row("Swapped.clf")), box(find(root, "lut-list")), []
     over_second = QPoint(int(into.center().x()), int(into.top() + 4 + 28)) - row.center().toPoint()
     moves(view, row.center().toPoint(), [over_second, over_second],
           lambda: shown_.append((find(root, "lut-item:0").property("place"), find(root, "lut-item:1").property("place"), find(root, "lut-gap").isVisible())))
     faults.expect(shown_ == [(0, 2, True)], f"held over the second place, the rows stand at {shown_} (the second should make room)")
-    faults.expect(names() == ["Same", "Swapped", "Opposite"] and not find(root, "lut-gap").isVisible() and find(root, "lut-item:2").property("place") == 2,
+    faults.expect(names() == ["Same.cube", "Swapped.clf", "Opposite.cube"] and not find(root, "lut-gap").isVisible() and find(root, "lut-item:2").property("place") == 2,
                   f"let go between the first and the second, it is at {names()}")
     session.moveLut(1, 2)
     off = np.abs(seen() - (255 - plain_)[:, ::-1])[inside].max()
-    faults.expect(names() == ["Same", "Opposite", "Swapped"] and off <= 2, f"three LUTs one after the other: up to {off} levels from the opposite with red and blue swapped")
+    faults.expect(names() == ["Same.cube", "Opposite.cube", "Swapped.clf"] and off <= 2, f"three LUTs one after the other: up to {off} levels from the opposite with red and blue swapped")
     # Dragged to the top, it is the first; one step of undo.
     # (And while it is dragged the two it passes stand a row lower, as they will.)
     steps, row, shown_ = session.steps, box(find(root, "lut-item:2")), []
@@ -3599,11 +3603,11 @@ def audit_lut() -> list[str]:
     faults.expect(shown_ == [(1, 2, 0)] and [find(root, f"lut-item:{n}").property("place") for n in range(3)] == [0, 1, 2]
                   and [round(box(find(root, f"lut-item:{n}")).top() - box(find(root, "lut-list")).top() - 4) for n in range(3)] == [0, 28, 56],
                   f"a row dragged past the top: the others and it stood at {shown_} meanwhile (it should stop at the first place), and after it the rows are at {[find(root, f'lut-item:{n}').property('place') for n in range(3)]}")
-    faults.expect(names() == ["Swapped", "Same", "Opposite"] and session.steps == steps + 1, f"a LUT dragged from third to first place: {names()} in {session.steps - steps} steps")
+    faults.expect(names() == ["Swapped.clf", "Same.cube", "Opposite.cube"] and session.steps == steps + 1, f"a LUT dragged from third to first place: {names()} in {session.steps - steps} steps")
     row, shown_ = box(find(root, "lut-item:0")), []
     down = QPoint(0, int(7 * row.height()))
     moves(view, row.center().toPoint(), [down, down], lambda: shown_.append(round(box(find(root, "lut-item:0")).top() - into.top() - 4)))
-    faults.expect(shown_ == [56] and names() == ["Same", "Opposite", "Swapped"], f"a row dragged far past the bottom stood at {shown_} px (the last place is 56), then: {names()}")
+    faults.expect(shown_ == [56] and names() == ["Same.cube", "Opposite.cube", "Swapped.clf"], f"a row dragged far past the bottom stood at {shown_} px (the last place is 56), then: {names()}")
     session.undo()
     settle()
     view.grabWindow()
@@ -3621,13 +3625,13 @@ def audit_lut() -> list[str]:
         off = np.abs(written - screen).max() if written.shape == screen.shape else 999
         faults.expect(off <= 1, f"the exported picture is not the one on screen with its LUTs: up to {off} levels off")
     # Uninstalled (after a question), it changes nothing on the photo and its row says so.
-    over(shelf_row("Opposite"))
-    click(view, find(root, f"lut-uninstall:{[one['name'] for one in session.lutsInstalled].index('Opposite')}"))
+    over(shelf_row("Opposite.cube"))
+    click(view, find(root, f"lut-uninstall:{[one['name'] for one in session.lutsInstalled].index('Opposite.cube')}"))
     view.grabWindow()
     faults.expect(find(root, "modal:confirm").isVisible() and len(session.lutsInstalled) == 3, "uninstalling a LUT does not ask first")
     click(view, find(root, "confirm-yes"))
     off = np.abs(seen() - plain_[:, ::-1])[inside].max()
-    faults.expect([one["name"] for one in session.lutsInstalled] == ["Same", "Swapped"] and session.lutsOn[2]["lost"] and off <= 2 and names() == ["Swapped", "Same", "Opposite"],
+    faults.expect([one["name"] for one in session.lutsInstalled] == ["Same.cube", "Swapped.clf"] and session.lutsOn[2]["lost"] and off <= 2 and names() == ["Swapped.clf", "Same.cube", "Opposite.cube"],
                   f"a LUT uninstalled: still laid on ({off} levels from the photo with red and blue swapped), or not marked as gone")
     # Installed again from a file of another name, it is found again by the photo, under
     # its new name: by its colors, and also where the photo names it as the first day's
@@ -3635,22 +3639,22 @@ def audit_lut() -> list[str]:
     (folder / "Negative.cube").write_text((folder / "Opposite.cube").read_text("utf-8"), "utf-8")
     session.installLuts([str(folder / "Negative.cube")])
     off = np.abs(seen() - (255 - plain_)[:, ::-1])[inside].max()
-    faults.expect(not session.lutsOn[2]["lost"] and session.lutsOn[2]["name"] == "Negative" and off <= 2,
+    faults.expect(not session.lutsOn[2]["lost"] and session.lutsOn[2]["name"] == "Negative.cube" and off <= 2,
                   f"installed again as Negative: the photo's entry is {session.lutsOn[2]}, the picture {off} levels from what it was with it")
     old = lut.written((folder / "Opposite.cube").read_text("utf-8"))
     session.setEdit("luts", [{"id": old, "name": "Opposite of old", "size": 9, "strength": 100.0}])
     off = np.abs(seen() - (255 - plain_))[inside].max()
-    faults.expect(old != session.lutsInstalled[0]["id"] and not session.lutsOn[0]["lost"] and session.lutsOn[0]["name"] == "Negative" and off <= 2,
+    faults.expect(old != session.lutsInstalled[0]["id"] and not session.lutsOn[0]["lost"] and session.lutsOn[0]["name"] == "Negative.cube" and off <= 2,
                   f"a LUT named as the first day named it: {session.lutsOn[0]}, the picture {off} levels from the opposite")
     session.undo()
     settle()
     # The bin takes one off the photo; the fifth is refused.
     over(find(root, "lut-item:2"))
     click(view, find(root, "lut-delete:2"))
-    faults.expect(names() == ["Swapped", "Same"], f"the bin on the third row left {names()}")
+    faults.expect(names() == ["Swapped.clf", "Same.cube"], f"the bin on the third row left {names()}")
     for _ in range(3):
-        lay("Same", 0)
-    faults.expect(len(names()) == 5 and names()[0] == "Same", f"dragged to the top three times, a photo with two has {names()}")
+        lay("Same.cube", 0)
+    faults.expect(len(names()) == 5 and names()[0] == "Same.cube", f"dragged to the top three times, a photo with two has {names()}")
     # More than the four rows in sight: the wheel scrolls the list, which says there is more.
     scroll, into = find(root, "lut-scroll"), box(find(root, "lut-list"))
     faults.expect(scroll.property("contentHeight") == 5 * 28 and find(root, "luts-more").isVisible(), "five LUTs: the list does not say that there is more below")
@@ -3698,19 +3702,19 @@ def audit_lut() -> list[str]:
     top = box(find(root, "lut-item:0"))
     foot = QPoint(0, int(into.bottom() - 8 - top.center().y()))
     moves(view, top.center().toPoint(), [foot, foot], lambda: wait(lambda: scroll.property("contentY") >= 27, 2000))
-    faults.expect(names() == ["Same", "Same", "Swapped", "Same", "Same"], f"the first row dragged to the box's foot and held there: {names()} (it should be the last of five)")
+    faults.expect(names() == ["Same.cube", "Same.cube", "Swapped.clf", "Same.cube", "Same.cube"], f"the first row dragged to the box's foot and held there: {names()} (it should be the last of five)")
     session.undo()
     # Sixteen at most.
     while session.addLut(session.lutsInstalled[0]["id"]) >= 0:
         pass
     faults.expect(len(names()) == edit.LUTS == 16 and "16 LUTs" in session.error, f"a seventeenth LUT: {len(names())} on the photo, said {session.error!r}")
-    lay("Same", 0)
+    lay("Same.cube", 0)
     faults.expect(len(names()) == 16, "an installed LUT can be dragged onto a photo that has sixteen")
     # A .cube dropped on the photo is installed and laid on.
     session.setEdit("luts", [])
     (folder / "Dropped.cube").write_text(lut.cube(same[..., [1, 2, 0]], "Dropped"), "utf-8")
     session.open([str(folder / "Dropped.cube")])
-    faults.expect(names() == ["Dropped"] and "Dropped" in [one["name"] for one in session.lutsInstalled] and session.index == 0,
+    faults.expect(names() == ["Dropped.cube"] and "Dropped.cube" in [one["name"] for one in session.lutsInstalled] and session.index == 0,
                   f"a .cube dropped on the photo: on it {names()}, installed {[one['name'] for one in session.lutsInstalled]}")
     faults.extend(audit_layout(view))
     faults.extend(f"the interface warned: {said}" for said in warnings if "lut" in said.lower())

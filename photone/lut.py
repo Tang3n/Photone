@@ -1,12 +1,16 @@
 """LUTs as .cube files: reading one (a look made elsewhere, laid on the photo by the shader),
-and writing one."""
+and writing one. A .clf file of one 3D table is read too, as the same table."""
 
 import hashlib
+from xml.etree import ElementTree
 
 import numpy as np
 
 LARGEST = 65          # points a side a LUT may have
 BYTES = 40_000_000    # a .cube file larger than this is not read (65 points a side is 8 MB)
+# What a CLF table's numbers run up to, by its outBitDepth: integers to their largest, floats to 1.
+DEPTHS = {"8i": 255.0, "10i": 1023.0, "12i": 4095.0, "16i": 65535.0, "16f": 1.0, "32f": 1.0}
+ASIDE = {"Description", "InputDescriptor", "OutputDescriptor", "Info"}  # (a CLF's words, no step)
 
 
 def _size(head: dict) -> int:
@@ -31,9 +35,14 @@ def _size(head: dict) -> int:
 def parse(text: str) -> np.ndarray:
     """A 3D .cube file's table as floats, indexed [blue][green][red] (the file's own order:
     red runs fastest), or ValueError saying what is wrong with it. Read as untrusted: no
-    longer than BYTES, and of the size it says."""
+    longer than BYTES, and of the size it says. A .clf file's too (`_clf`)."""
     if len(text) > BYTES:
         raise ValueError("the file is too large to be a LUT")
+    begun = text.lstrip(chr(0xFEFF) + " \t\r\n")  # (a byte order mark: some programs write one)
+    return _clf(begun) if begun.startswith("<") else _cube(text)
+
+
+def _cube(text: str) -> np.ndarray:
     head, rows = {}, []
     for line in text.splitlines():
         words = line.split("#")[0].split()
@@ -51,6 +60,53 @@ def parse(text: str) -> np.ndarray:
     if not np.isfinite(table).all():
         raise ValueError("it holds numbers that are no colors")
     return table
+
+
+def _tag(element) -> str:
+    """An XML element's name without its namespace (CLF 2 and 3 have each their own)."""
+    return str(element.tag).rpartition("}")[2]
+
+
+def _lut3d(text: str) -> ElementTree.Element:
+    """The one step of a CLF file (Common LUT Format: XML) where it is a LUT3D, or ValueError
+    saying what the file does instead."""
+    if "<!DOCTYPE" in text or "<!ENTITY" in text:  # (an entity can be made to grow huge)
+        raise ValueError("it declares a DOCTYPE, which a CLF file does not")
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError as e:
+        raise ValueError("it is not XML that can be read") from e
+    if _tag(root) != "ProcessList":
+        raise ValueError("it is no CLF file (no ProcessList)")
+    steps = [step for step in root if _tag(step) not in ASIDE]
+    if [_tag(step) for step in steps] != ["LUT3D"]:
+        did = ", ".join(_tag(step) for step in steps) or "nothing"
+        raise ValueError(f"it does {did}; a CLF of one LUT3D alone can be used")
+    return steps[0]
+
+
+def _clf(text: str) -> np.ndarray:
+    """A CLF file of one 3D table as `parse` has a .cube file's. In a CLF blue runs fastest,
+    and the numbers run up to what its outBitDepth says."""
+    lut3d = _lut3d(text)
+    arrays = [part for part in lut3d if _tag(part) == "Array"]
+    if len(arrays) != 1 or any(_tag(part) == "IndexMap" for part in lut3d):
+        raise ValueError("its LUT3D is not one Array alone")
+    depth = DEPTHS.get(lut3d.get("outBitDepth", ""))
+    if depth is None:
+        said = lut3d.get("outBitDepth")
+        raise ValueError(f"its outBitDepth {said!r} is none of {', '.join(DEPTHS)}")
+    dim = arrays[0].get("dim", "").split()
+    if len(dim) != 4 or not "".join(dim).isdigit() or len(set(dim[:3])) != 1 or dim[3] != "3":
+        raise ValueError(f"its Array is not of N N N 3 (dim {' '.join(dim)!r})")
+    size = int(dim[0])
+    if not 2 <= size <= LARGEST:
+        raise ValueError(f"a LUT of {size} points a side (2 to {LARGEST} can be used)")
+    words = (arrays[0].text or "").split()
+    if len(words) != 3 * size ** 3:
+        raise ValueError(f"{len(words) // 3} colors where {size ** 3} are needed")
+    table = _colors(words, size) / np.float32(depth)
+    return np.ascontiguousarray(table.transpose(2, 1, 0, 3))  # ([red][green][blue] as it is)
 
 
 def fingerprint(table: np.ndarray) -> str:

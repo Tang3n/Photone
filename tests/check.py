@@ -590,6 +590,31 @@ def check_lut() -> None:
     assert len(lut.fingerprint(table)) == 20 and lut.fingerprint(table).isalnum(), "it is what the file is kept under"
 
 
+def check_clf() -> None:
+    """A .clf file (photone/lut.py, `_clf`): one 3D table read as a .cube's is, anything more
+    refused with what it holds."""
+    from photone import lut
+    odd = np.random.default_rng(3).random((3, 3, 3, 3)).astype(np.float32)  # (no symmetry to hide a turned axis)
+
+    def clf(table, depth="32f", scale=1.0, more="", head='<?xml version="1.0" encoding="UTF-8"?>\n'):
+        rows = "\n".join(" ".join(f"{v:.9g}" for v in row) for row in table.transpose(2, 1, 0, 3).reshape(-1, 3) * scale)
+        return (f'{head}<ProcessList xmlns="urn:AMPAS:CLF:v3.0" id="x" compCLFversion="3.0"><Description>a look</Description>{more}'
+                f'<LUT3D inBitDepth="32f" outBitDepth="{depth}"><Array dim="3 3 3 3">\n{rows}\n</Array></LUT3D></ProcessList>')
+    assert np.array_equal(lut.parse(clf(odd)), odd), "blue runs fastest in a CLF"
+    tenth = np.round(odd * 1023) / 1023
+    assert np.allclose(lut.parse(chr(0xFEFF) + "\n" + clf(tenth, "10i", 1023)), tenth, atol=1e-6), "10 bits run up to 1023 (after a byte order mark)"
+    matrix = '<Matrix inBitDepth="32f" outBitDepth="32f"><Array dim="3 3">1 0 0 0 1 0 0 0 1</Array></Matrix>'
+    for bad, why in ((clf(odd, more=matrix), "does Matrix, LUT3D"), (clf(odd).replace('dim="3 3 3 3"', 'dim="3 3 4 3"'), "N N N 3"),
+                     (clf(odd, "9i"), "outBitDepth '9i'"), (clf(odd).replace("</ProcessList>", ""), "not XML"),
+                     ('<!DOCTYPE x [<!ENTITY a "aaaa">]>' + clf(odd, head=""), "DOCTYPE"), ("<cube/>", "no CLF"),
+                     (clf(odd).replace("\n</Array>", " 1 2 3\n</Array>"), "28 colors where 27"), (clf(odd).replace("0.", "x.", 1), "no number")):
+        try:
+            lut.parse(bad)
+            raise AssertionError(f"a CLF that cannot be used was read: {why}")
+        except ValueError as said:
+            assert why in str(said), f"{why!r} is not in {str(said)!r}"
+
+
 def check_detail() -> None:
     """Sharpening and noise reduction (photone/edit.py): their settings, and the numbers the
     shader is handed, which go by the size of the stored picture."""
@@ -2782,6 +2807,7 @@ def main() -> None:
     check_look()
     check_presets()
     check_lut()
+    check_clf()
     check_detail()
     check_lens()
     check_mark()
