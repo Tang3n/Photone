@@ -115,6 +115,8 @@ layout(std140, binding = 0) uniform buf {
     mat4 lensBlue;    // and blue (distortion, chromatic aberration),
     mat4 lensLight;   // and how many times lighter a pixel is made (vignetting).
     float defringe;   // Fringes of color at edges taken off (`defringed`): how much, 0 to 1.
+    float detailKept; // 0: sharpening and noise reduction are done here; 1: the picture read has them
+                      // done already (PhotoView's `detailed`); 2: this draws that picture.
 };
 layout(binding = 1) uniform sampler2D source;  // the first picture, with mipmaps
 // The full-size picture. Bound from the moment it arrives, used or not, so that the GPU
@@ -483,8 +485,12 @@ float lensAt(mat4 table, float r) {
 // counts for nothing itself. The more so the higher Luminance is, wholly from 50.
 // Sharpening adds what the pixel's lightness differs by from the mean of the eight around it
 // (at `sharpenRadius`), unless that is less than `sharpenMask` (noise, not an edge).
-// `much`: how much of all this is done (none where the photo is seen from far: there is
-// nothing of a pixel's size to see, and the neighbors read would be no neighbors).
+// `much`: how much of all this is done: none where two or more pixels of the photo go into
+// one of the screen, since the neighbors read there are a coarser picture's, no neighbors.
+// The photo on screen is not drawn so from far: PhotoView does all of this once over every
+// pixel of it (`detailKept` 2) and draws from that, made smaller as an export would be (the
+// owner: "it can be VERY visible", zoomed out; until 2026-11-20 it was left out there).
+// What else draws small without that (the scopes' copies, the export's preview) still skips it.
 vec3 detailed(sampler2D tex, vec2 at, vec3 centre, float much) {
     vec2 px = vec2(detailX, detailY);
     vec3 s0 = sqrt(max(centre, 0.0));
@@ -589,13 +595,13 @@ void main() {
         if (crisp > 0.5) here = useSharp > 0.5 ? squarely(sharp, here) : squarely(source, here);
         pixel = useSharp > 0.5 ? texture(sharp, here).rgb : texture(source, here).rgb;
     }
-    bool fringes = defringe > 0.0;
+    bool fringes = defringe > 0.0 && detailKept < 1.5;
     if (fringes || sharpen > 0.0 || denoise > 0.0 || denoiseColor > 0.0) {
         // (All of it where a pixel of the photo is a pixel of the screen or larger; none
         // where two or more of them go into one.)
         vec2 covered = fwidth(qt_TexCoord0) / vec2(detailX, detailY);
         float much = clamp(2.0 - max(covered.x, covered.y), 0.0, 1.0);
-        if (much > 0.0 && (sharpen > 0.0 || denoise > 0.0 || denoiseColor > 0.0)) {
+        if (abs(detailKept - 1.0) > 0.5 && much > 0.0 && (sharpen > 0.0 || denoise > 0.0 || denoiseColor > 0.0)) {
             if (useSharp > 0.5) pixel = detailed(sharp, here, pixel, much);
             else pixel = detailed(source, here, pixel, much);
         }
@@ -606,6 +612,10 @@ void main() {
             if (useSharp > 0.5) pixel = defringed(sharp, here, pixel, reach);
             else pixel = defringed(source, here, pixel, reach);
         }
+    }
+    if (detailKept > 1.5) {  // (the kept picture: no further; it holds light, as read)
+        fragColor = vec4(pixel, 1.0);
+        return;
     }
     pixel *= lighter;
     vec3 c = develop(pixel);

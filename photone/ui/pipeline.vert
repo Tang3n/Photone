@@ -107,6 +107,8 @@ layout(std140, binding = 0) uniform buf {  // must match pipeline.frag exactly
     mat4 lensBlue;    // and blue (distortion, chromatic aberration),
     mat4 lensLight;   // and how many times lighter a pixel is made (vignetting).
     float defringe;   // Fringes of color at edges taken off (`defringed`): how much, 0 to 1.
+    float detailKept; // 0: sharpening and noise reduction are done here; 1: the picture read has them
+                      // done already (PhotoView's `detailed`); 2: this draws that picture.
 };
 void main() {
     // Which part of the stored picture this corner of the item shows: the photo's frame

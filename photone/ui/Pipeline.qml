@@ -121,6 +121,7 @@ ShaderEffect {
     property matrix4x4 lensBlue: used.lensBlue
     property matrix4x4 lensLight: used.lensLight
     property real defringe: used.defringe
+    property real detailKept: 0   // 1: `sharp` has sharpening and noise reduction done already (PhotoView's `detailed`)
     fragmentShader: pipelineShader
     vertexShader: pipelineVertex
 }

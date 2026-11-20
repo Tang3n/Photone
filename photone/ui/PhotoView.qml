@@ -143,6 +143,37 @@ Item {
         source: view.have ? session.fullSource : ""
         asynchronous: true; cache: false; visible: false
     }
+    // Sharpening and noise reduction done once over every pixel of the photo, and kept: seen
+    // from further than 100 %, the photo is drawn from this (pipeline.frag, `detailKept`),
+    // made smaller through its mipmaps as an export made smaller would be. Done there per pixel
+    // of the screen, they were left out, the neighbors read being a coarser picture's (the
+    // owner: "it can be VERY visible and i find myself zooming out a lot to see it"). A frame
+    // that changes anything else (a slider, a pan) does not do them again.
+    // From 100 % in the photo does them itself as it did: sharpened after it is enlarged,
+    // an edge stays as steep as it was (done before, the lens audit's wedge went soft).
+    // ponytail: while further than 100 %, one more picture of the photo's full size on the GPU
+    // (16-bit floats and mipmaps: 256 MB at 24 MP), made anew on each going out past 100 % and
+    // at each change of a Detail slider. The upgrade, should a pass over all of it be too slow
+    // on a large file, is to do it over the part of the photo in view only.
+    // (Not until the full-size picture is there: until then the photo is as it was.)
+    Pipeline {
+        id: detailed
+        objectName: "detailed"
+        readonly property bool on: layer.enabled
+        // (The edit's other numbers stay as they first were: a change of one of them must not
+        // make it draw all of this again. None of them is read: `detailKept` 2 stops before.)
+        follows: false
+        visible: false; blending: false
+        width: view.sharpest.sourceSize.width; height: view.sharpest.sourceSize.height
+        source: view.sharpest; sharp: view.sharpest; useSharp: 1; detailKept: 2
+        frame: Qt.matrix4x4(); lensOn: 0   // (the stored picture as it is)
+        detailX: photo.detailX; detailY: photo.detailY
+        sharpen: photo.sharpen; sharpenRadius: photo.sharpenRadius; sharpenMask: photo.sharpenMask
+        denoise: photo.denoise; denoiseColor: photo.denoiseColor; denoiseFar: photo.denoiseFar
+        layer.enabled: view.ready && view.visible && photo.width < session.fullWidth && view.sharpest.sourceSize.width >= session.wide - 1
+        layer.textureSize: Qt.size(width, height); layer.format: ShaderEffectSource.RGBA16F
+        layer.mipmap: true; layer.smooth: true
+    }
     // Until the photo's first picture is there (0.03 s for a neighbor, 0.3 s for a photo that
     // was not decoded ahead), its thumbnail stands in for it, fitted as the photo will be:
     // the photo is on screen the moment it is asked for, soft, and sharp a moment later.
@@ -301,8 +332,9 @@ Item {
         x: Math.round(view.width / 2 - view.center.x * width + view.cropOff.x)
         y: Math.round(view.height / 2 - view.center.y * height + view.cropOff.y)
         source: pixels; painted: view.painted; lutPicture: view.lut
-        sharp: view.sharpReady ? sharpPixels : pixels
-        useSharp: view.useSharp ? 1 : 0
+        sharp: detailed.on ? detailed : view.sharpest
+        useSharp: view.useSharp || detailed.on ? 1 : 0
+        detailKept: detailed.on ? 1 : 0
         crisp: view.crisp ? 1 : 0
         cropDim: session.panels.tool === "crop" ? 1 : 0
         cropBox: Qt.vector4d(session.framing.frame[0], session.framing.frame[1], session.framing.frame[2], session.framing.frame[3])
@@ -332,7 +364,7 @@ Item {
         Pipeline {
             objectName: "photo-before"
             width: photo.width; height: photo.height
-            source: pixels; sharp: photo.sharp; useSharp: photo.useSharp; crisp: photo.crisp
+            source: pixels; sharp: view.sharpest; useSharp: view.useSharp ? 1 : 0; crisp: photo.crisp   // (the original: not `detailed`)
             edit: follows ? session.before : null
         }
     }

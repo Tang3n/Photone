@@ -4365,14 +4365,16 @@ def audit_detail() -> list[str]:
         written = export.bytes_of(file).astype(int)
         off = np.abs(written - screen)[4:-4, 4:-4].max() if written.shape == screen.shape else 999
         faults.expect(off <= 1, f"the exported picture is not the one on screen: up to {off} levels off")
-    # From far there is nothing of a pixel's size to see: nothing is done.
+    # From far as well, as an export made smaller (until 2026-11-20 none of it was done there;
+    # the owner: "it can be VERY visible"): the noise a view at 40 % still shows is taken out.
     call(stage(root), "zoomTo", 0.4, box(stage(root)).center().x(), box(stage(root)).center().y())
     settle()
     area = box(root.findChild(QObject, "photo"))
     small = lambda: export.bytes_of(view.grabWindow().copy(int(area.left()) + 8, int(area.top()) + 16, 48, 96)).astype(float)  # noqa: E731
-    with_ = small()
     set_()
-    faults.expect(np.abs(small() - with_).max() <= 1, f"seen at 40 %, the picture differs by up to {np.abs(small() - with_).max():.0f} levels with and without")
+    far = small().mean(axis=2).std()
+    set_(denoise=100.0)
+    faults.expect(small().mean(axis=2).std() < 0.8 * far, f"seen at 40 %, noise reduction at 100 leaves {small().mean(axis=2).std():.2f} levels of noise of {far:.2f}")
     ui.close_view(view)
     return faults
 
