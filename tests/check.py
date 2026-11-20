@@ -2008,19 +2008,19 @@ def check_describe() -> None:
         raw = Path(folder) / "a.arw"
         raw.write_bytes(header + np.random.default_rng(1).bytes(5000))
         said = library.describe(raw)
-        assert said["camera"] == "SONY ILCE-7M4" and said["turned"] == 6, said
+        assert said["camera"] == "SONY ILCE-7M4", said
         assert time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(said["taken"])) == "2026-07-04 13:35:44"
         same = Path(folder) / "b.dng"
         same.write_bytes(exif("Canon", "Canon EOS R6", "2025:01:02 03:04:05", 1) + b"x" * 100)
         assert library.describe(same)["camera"] == "Canon EOS R6", "the maker is not said twice"
         photo = picture_file(Path(folder) / "c.jpg", header)
-        assert library.describe(photo)["camera"] == "SONY ILCE-7M4" and library.describe(photo)["turned"] == 6
+        assert library.describe(photo)["camera"] == "SONY ILCE-7M4"
         for name, content in (("none.jpg", None), ("junk.arw", b"II*\0" + b"\xff" * 300), ("short.nef", b"MM"),
                               ("other.raf", b"FUJIFILMCCD-RAW 0201" + b"\0" * 200)):
             odd = Path(folder) / name
             picture_file(odd) if content is None else odd.write_bytes(content)
             said = library.describe(odd)  # nothing to read: the file's own date, no camera, upright
-            assert said["camera"] == "" and said["turned"] == 1 and abs(said["taken"] - odd.stat().st_mtime) < 1, (name, said)
+            assert said["camera"] == "" and abs(said["taken"] - odd.stat().st_mtime) < 1, (name, said)
         loop = Path(folder) / "loop.dng"  # a directory whose EXIF pointer points back at itself
         loop.write_bytes(b"II*\0" + struct.pack("<IH", 8, 1) + struct.pack("<HHII", 0x8769, 4, 1, 8) + b"\0" * 8)
         assert library.describe(loop)["camera"] == "", "a file that points in circles is not followed for ever"
@@ -2759,7 +2759,7 @@ def check_denoise() -> None:
         now = again["notes"][0]
         assert now != notes_at and again["exif"][0x927c][2] == sony(now) and whole[now + 38:now + 46] == b"lenstype", "the maker's notes point at themselves where they now lie"
         said = library.describe(out)
-        assert said["camera"] == "SONY ILCE-7M4" and said["turned"] == 8 and said["bias"] == -1.3, said
+        assert said["camera"] == "SONY ILCE-7M4" and said["bias"] == -1.3, said
         assert library.about(out)["iso"] == "ISO 6400" and library.about(out)["shutter"] == "1/250 s", library.about(out)
         for wrong in (lambda: denoise.develop(out), lambda: denoise.develop(Path(folder) / "a.jpg")):
             try:

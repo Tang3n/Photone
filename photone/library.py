@@ -150,12 +150,12 @@ def _exif_start(file) -> int | None:
 
 
 def describe(photo: Path) -> dict:
-    """When a photo was taken (seconds, as local time), with what camera, how it is turned
-    (EXIF orientation, 1 upright) and with what exposure compensation (`bias`, in stops, which
-    only the catalog still asks for, for edits kept when the exposure started from it; 0
-    where none is given), read from the file's own header: no decoding, well under a
-    millisecond. Where the header is of a kind not read here (Canon CR3, Fujifilm RAF), or says
-    nothing, the date is the file's and the camera unknown."""
+    """When a photo was taken (seconds, as local time), with what camera and with what
+    exposure compensation (`bias`, in stops, which only the catalog still asks for, for edits
+    kept when the exposure started from it; 0 where none is given), read from the file's own
+    header: no decoding, well under a millisecond. Where the header is of a kind not
+    read here (Canon CR3, Fujifilm RAF), or says nothing, the date is the file's and the
+    camera unknown."""
     tags = {}
     try:
         with photo.open("rb") as file:
@@ -173,7 +173,7 @@ def describe(photo: Path) -> dict:
     camera = model if model.lower().startswith(maker.lower().split(" ")[0]) else f"{maker} {model}"
     bias = tags.get(0x9204, 0.0)
     return {"taken": taken or photo.stat().st_mtime, "camera": camera.strip(),
-            "turned": tags.get(0x112, 1), "bias": bias if abs(bias) <= 10 else 0.0}
+            "bias": bias if abs(bias) <= 10 else 0.0}
 
 
 ROMAN = {"2": "II", "3": "III", "4": "IV", "5": "V", "6": "VI", "7": "VII", "8": "VIII"}
@@ -356,7 +356,10 @@ def _preview(photo: Path):
 
     try:
         with rawpy.imread(str(photo)) as raw:
-            carried = raw.extract_thumb()
+            # (Which way is up by the decoder, as the opened photo stands: this file's own
+            # reading of the header knows no Canon CR3, whose upright photos lay on their
+            # side until opened; the owner: "images can have rotated previews".)
+            carried, flip = raw.extract_thumb(), raw.sizes.flip
     except (rawpy.LibRawError, OSError) as e:
         raise decode.Unreadable(f"{photo.name}: no preview in this file ({e})") from e
     if carried.format == rawpy.ThumbFormat.JPEG:
@@ -369,7 +372,7 @@ def _preview(photo: Path):
         held = carried.data.tobytes()  # (kept until the image has pixels of its own)
         image = QImage(held, wide, high, wide * 3, QImage.Format.Format_RGB888)
         image = image.scaled(THUMB, THUMB, Qt.AspectRatioMode.KeepAspectRatio).copy()
-    quarter = {3: 180, 6: 90, 8: 270}.get(describe(photo)["turned"])
+    quarter = {3: 180, 5: 270, 6: 90}.get(flip)
     return image.transformed(QTransform().rotate(quarter)) if quarter else image
 
 
