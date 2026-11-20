@@ -866,12 +866,51 @@ def check_tone_settings() -> None:
     assert edit.uniforms({}, None, False)["mid"] == edit.MID_FINISHED, "a finished picture's mid gray"
     more = edit.uniforms({"contrast": 100, "brightness": 100}, None, True)
     less = edit.uniforms({"contrast": -100, "brightness": -100}, None, True)
-    assert more["contrast"] == 1 and less["contrast"] == -0.5, "stops from mid gray doubled, halved"
+    assert more["contrast"] == 0.5 and less["contrast"] == -0.5, "stops from mid gray half as many again, halved"
     assert more["brightness"] == -0.5 and less["brightness"] == 1, "the power on luminance, less one"
     assert rest["whites"] == 0 and rest["blacks"] == 0 and rest["vibrance"] == 0 and rest["look"] == 0 and rest["midtones"] == 0
     assert {"whites", "blacks", "midtones"} <= set(edit.TOOLS["tone"]) and "vibrance" in edit.TOOLS["saturation"]
     assert edit.uniforms({"midtones": 100}, None, True)["midtones"] == 1 and edit.clean({"midtones": -300}) == {"midtones": -100.0}
     assert edit.clean({"whites": 30, "blacks": -250, "vibrance": 1e9}) == {"whites": 30.0, "blacks": -100.0, "vibrance": 100.0}
+
+
+def check_tone_even() -> None:
+    """Highlights, Whites and Midtones at their ends squeeze evenly: no band of tones is left
+    flat next to one left as it was, which looks harsh (the owner). How much of the contrast
+    is kept, at the least and at the most."""
+    def kept(wedge, values: dict, curve: bool = True) -> np.ndarray:
+        plain, moved = (edit.uniforms({"exposure": 0.0, **v}, None, True) for v in ({}, values))
+        was, now = (np.log(edit.tone_at(wedge, u if curve else {**u, "curveC": 0.0})) for u in (plain, moved))
+        return np.diff(now) / np.diff(was)
+
+    lights = np.geomspace(edit.MID * 1.05, 1.0, 400)
+    assert kept(lights, {"whites": -100.0}).min() > 0.4, "Whites -100 flattens a band of the lights"
+    assert kept(lights, {"highlights": -100.0}).min() > 0.35, "Highlights -100 flattens a band of the lights"
+    assert kept(lights, {"highlights": -100.0, "whites": -100.0}).min() > 0.14
+    # Shadows up lifts the shadows and leaves black: a stop and more four stops under mid
+    # gray, nothing eight under; down, all of it there.
+    def lift(stops: float, shadows: float) -> float:
+        plain, moved = (edit.uniforms({"exposure": 0.0, **v}, None, True) for v in ({}, {"shadows": shadows}))
+        return float(np.log2(edit.tone_at(edit.MID * 2 ** stops, {**moved, "curveC": 0.0}) / edit.tone_at(edit.MID * 2 ** stops, {**plain, "curveC": 0.0})))
+    assert lift(-4, 100.0) > 1.2 and abs(lift(-8, 100.0)) < 1e-9 and abs(lift(-8, -100.0) + 1.5) < 1e-9
+    # Contrast down flattens the middle and leaves the two ends: half the contrast round mid
+    # gray, black where it was, the sensor's white less than half a stop down.
+    def flat(stops: float) -> float:
+        plain, moved = (edit.uniforms({"exposure": 0.0, **v}, None, True) for v in ({}, {"contrast": -100.0}))
+        return float(np.log2(edit.tone_at(edit.MID * 2 ** stops, {**moved, "curveC": 0.0}) / edit.tone_at(edit.MID * 2 ** stops, {**plain, "curveC": 0.0})))
+    assert abs(flat(-1) - 0.5) < 1e-9 and abs(flat(-8)) < 1e-9 and -0.5 < flat(3) < 0 and abs(flat(0.5) + 0.25) < 1e-9
+    # Contrast up steepens the middle by half and leaves the two ends: black and the sensor's
+    # white where they were, nothing between them flat (over half of the contrast at the least, deep in the shadows).
+    def steep(stops: float) -> float:
+        plain, moved = (edit.uniforms({"exposure": 0.0, **v}, None, True) for v in ({}, {"contrast": 100.0}))
+        return float(np.log2(edit.tone_at(edit.MID * 2 ** stops, {**moved, "curveC": 0.0}) / edit.tone_at(edit.MID * 2 ** stops, {**plain, "curveC": 0.0})))
+    assert abs(steep(3)) < 1e-9 and abs(steep(-8)) < 1e-9 and abs(steep(-1) + 0.5) < 1e-9 and 0.3 < steep(1) < 0.5
+    k = kept(np.geomspace(edit.MID / 256, 1.0, 800), {"contrast": 100.0}, False)
+    assert 0.55 < k.min() and abs(k.max() - 1.5) < 0.01, f"Contrast +100 keeps {k.min():.2f} to {k.max():.2f} of the contrast"
+    wedge = np.geomspace(edit.MID / 16, edit.MID * 16, 800)  # (on scene light: no curve)
+    for m in (100.0, -100.0):
+        k = kept(wedge, {"midtones": m}, False)
+        assert k.min() > 0.55 and k.max() < 1.45, f"Midtones {m} flattens or steepens a band by more than 0.45"
 
 
 def check_tone_ends() -> None:
@@ -885,13 +924,19 @@ def check_tone_ends() -> None:
         rest = shown(mid, raw)
         for values in ({"whites": 100.0}, {"whites": -100.0}, {"blacks": 100.0}, {"blacks": -100.0}):
             assert abs(shown(mid, raw, **values) - rest) < 1e-9, f"{values} moves mid gray"
-        assert abs(shown(1.0, raw, whites=-100.0) - 2 ** -0.6) < 1e-9, "Whites -100: white is 0.6 stops under white"
+        assert abs(shown(1.0, raw, whites=-100.0) - 2 ** -0.8) < 1e-9, "Whites -100: white is 0.8 stops under white"
         assert shown(0.5, raw, whites=100.0) > 1.15 * shown(0.5, raw) and shown(0.5, raw, whites=-100.0) < 0.87 * shown(0.5, raw)
         assert shown(0.0, raw, blacks=100.0) == 0.03 and shown(0.0, raw, blacks=50.0) == 0.0075, "Blacks +: black is lifted"
         assert shown(0.004, raw, blacks=-100.0) == 0 and 0 < shown(0.004, raw, blacks=-10.0) < shown(0.004, raw), "Blacks -: cut off at black"
         assert abs(shown(0.6, raw, blacks=-100.0) - shown(0.6, raw)) < 1e-9, "Blacks leaves the lights alone"
         assert abs(shown(0.02, raw, whites=100.0) - shown(0.02, raw)) < 1e-9, "Whites leaves the darks alone"
-    # Midtones: a stop at mid gray, the same within half a stop of it, nothing two and a half
+    # Highlights: 1.8 stops at the sensor's white, which is what brings a bright sky down
+    # (half the sensor's white is shown at level 238 of 255), and little at mid gray.
+    low = edit.uniforms({"exposure": 0.0, "highlights": -100.0}, None, True)
+    plain = edit.uniforms({"exposure": 0.0}, None, True)
+    assert float(edit.tone_at(0.5, low)) < 0.7 * float(edit.tone_at(0.5, plain)), "Highlights -100 does not bring a bright sky down"
+    assert float(edit.tone_at(edit.MID, low)) > 0.93 * float(edit.tone_at(edit.MID, plain)), "Highlights moves mid gray"
+    # Midtones: a stop at mid gray, nearly that a third of a stop from it, nothing three and a half
     # stops away; on scene light, before the curve.
     for raw in (True, False):
         mid = edit.MID if raw else edit.MID_FINISHED
@@ -899,8 +944,8 @@ def check_tone_ends() -> None:
         more, less = (edit.uniforms({"exposure": 0.0, "midtones": m}, None, raw) for m in (100.0, -100.0))
         assert abs(float(edit.tone_at(mid, more)) - float(edit.tone_at(2 * mid, plain))) < 1e-9, "Midtones +100: mid gray a stop up"
         assert abs(float(edit.tone_at(mid, less)) - float(edit.tone_at(mid / 2, plain))) < 1e-9, "Midtones -100: a stop down"
-        assert abs(float(edit.tone_at(mid * 1.3, more)) - float(edit.tone_at(2.6 * mid, plain))) < 1e-9, "the same a third of a stop from it"
-        for far in (mid * 2 ** 2.5, mid * 2 ** -2.5, mid * 2 ** -5, 0.0):
+        assert float(edit.tone_at(mid * 1.3, more)) > float(edit.tone_at(2.5 * mid, plain)), "nearly the same a third of a stop from it"
+        for far in (mid * 2 ** 3.5, mid * 2 ** -3.5, mid * 2 ** -5, 0.0):
             assert abs(float(edit.tone_at(far, more)) - float(edit.tone_at(far, plain))) < 1e-9, f"Midtones reaches {far}"
     ends = [(w, b) for w in (-100.0, 0.0, 100.0) for b in (-100.0, 0.0, 100.0)]
     others = ({}, {"contrast": -100.0, "shadows": 100.0, "highlights": -100.0}, {"contrast": 100.0, "shadows": -100.0, "highlights": 100.0},
@@ -2715,6 +2760,7 @@ def main() -> None:
     check_user_curve()
     check_tone_settings()
     check_tone_ends()
+    check_tone_even()
     check_vibrance()
     check_pins()
     check_frame()

@@ -803,14 +803,23 @@ def curve(profile: str) -> tuple[float, float, float]:
     return c, s, 1 + s
 
 
+def _eased(t):
+    """0 at 0 and 1 at 1, even between, eased in over the first three tenths: how Highlights
+    and Whites grow (the shader's `eased`). A smoothstep here flattens the middle of what it
+    covers and leaves the top as it was, which looks harsh."""
+    t = np.clip(t, 0, 1)
+    return np.where(t < 0.3, t * t / 0.6, t - 0.15) / 0.85
+
+
 def tone_at(x, u: dict):
     """What is shown for neutral light `x` (a share of the sensor's white, as recorded; a
     number or an array), by the shader's numbers `u`, as the shader's `develop` does it with
-    the white balance as shot: exposure; contrast, shadows and highlights as gains in stops
-    from mid gray; midtones, a gain round mid gray, on what those made; the profile's curve;
-    then Blacks and Whites, the two ends of what is shown, mid gray staying put (Blacks takes
-    light away below it, most at black, or adds some; Whites is a gain in stops above it,
-    most at white); then HDR. In HDR (`hdrLift`, the display's peak less one) what is shown
+    the white balance as shot: exposure; contrast and shadows as gains in stops from mid
+    gray; highlights, such a gain on what those made, and midtones, a gain round mid gray, on
+    what that made; the profile's curve; then Blacks and Whites, the two ends of what is
+    shown, mid gray staying put (Blacks takes light away below it, most at black, or adds
+    some; Whites is a gain in stops above it, most at white, growing with the stops above mid
+    gray); then HDR. In HDR (`hdrLift`, the display's peak less one) what is shown
     climbs on by the square of how light it is, so that the sensor's white lands on the peak:
     all of the picture is deeper, a shadow a little, white by the whole headroom. That is the
     last thing done, after brightness and (in the shader) after the tone curve and the colors'
@@ -821,16 +830,30 @@ def tone_at(x, u: dict):
     upgrade is a power that grows with the peak."""
     shown, gray = np.maximum(np.asarray(x, float), 0) * u["gain"], u["mid"]
     stops = np.log2(np.maximum(shown, 1e-6) / gray)
-    shown = shown * 2.0 ** (u["contrast"] * stops + u["shadows"] * (1 - _step(-4.5, 0.5, stops))
-                            + u["highlights"] * _step(-0.5, 3.0, stops))
+    # (Shadows up fades out toward black, none of it eight stops under mid gray: all of it
+    # there turned the blacks milky and brought their noise up. Down, it does not.)
+    dark = (1 - _step(-4.5, 0.5, stops)) * (_step(-8.0, -3.0, stops) if u["shadows"] > 0 else 1.0)
+    # (Contrast down counts the stops from mid gray less and less toward the two ends, none
+    # at eight stops under and four and a half above: counted in full, black was lifted three
+    # stops and white taken down one and a half, a milky gray picture. Up, it does not.)
+    # (Up, it counts them less and less too, none at white and none eight stops under: both
+    # ends stay where they are and what lies between is steeper, half as steep again round
+    # mid gray at +100. Counted in full it showed all from a stop and a half above mid gray
+    # as white.)
+    far = 1 - np.where(stops > 0, _step(*((0.5, 4.5) if u["contrast"] < 0 else (0.0, -np.log2(gray))), stops), _step(1.0, 8.0, -stops))
+    spread = stops * far
+    shown = shown * 2.0 ** (u["contrast"] * spread + u["shadows"] * dark)
+    stops = np.log2(np.maximum(shown, 1e-6) / gray)
+    shown = shown * 2.0 ** (u["highlights"] * _eased((stops + 0.5) / 4.5))
     away = np.abs(np.log2(np.maximum(shown, 1e-6) / gray))
-    shown = shown * 2.0 ** (u["midtones"] * (1 - _step(0.5, 2.5, away)))
+    shown = shown * 2.0 ** (u["midtones"] * (1 - _step(0.0, 3.5, away)))
     if u["curveC"] > 0:
         p, middle = shown ** u["curveC"], u["mid"] ** u["curveC"]
         shown = u["curveK"] * p / (p + u["curveS"])
         gray = u["curveK"] * middle / (middle + u["curveS"])
     shown = np.maximum(shown - u["blacks"] * (1 - _step(0.0, gray, shown)), 0)
-    shown = shown * 2.0 ** (u["whites"] * _step(gray, 1.0, shown))
+    above = np.log2(np.maximum(shown, 1e-6) / gray) / -np.log2(gray)
+    shown = shown * 2.0 ** (u["whites"] * _eased(above))
     shown = shown * np.clip(shown, 1e-6, 1.0) ** u["brightness"]
     # (HDR last: in the shader after the colors' tools too.)
     return shown + u["hdrLift"] * np.maximum(shown, 0) ** 2
@@ -1258,16 +1281,20 @@ def uniforms(edit: dict, camera: dict | None, raw: bool, white: float = 1.0,  # 
     out = {"gain": 2.0 ** exposure_of(full, camera), "wbGain": wb,
            "toCam": to_cam.tolist(), "fromCam": from_cam.tolist(),
            "mid": MID if raw else MID_FINISHED,
-           # Contrast: stops from mid gray are stretched by this much (+100 doubles them).
-           "contrast": 2.0 ** (full["contrast"] / 100) - 1,
+           # Contrast: stops from mid gray are stretched by this much round mid gray (-100
+           # halves them; +100 makes them half as many again: more, with white and black
+           # staying where they are, would leave the lights under white flat).
+           "contrast": (1.5 if full["contrast"] > 0 else 2.0) ** (full["contrast"] / 100) - 1,
            # Brightness: a power on the finished picture's luminance, less one (+100: 0.5).
            "brightness": 2.0 ** (-full["brightness"] / 100) - 1,
-           "highlights": full["highlights"] / 100, "shadows": full["shadows"] / 100 * 1.5,
+           # Highlights: up to 2.4 stops, 1.8 at the sensor's white. The profile shows half the
+           # sensor's white at level 238 of 255: one stop there moved a bright sky by little.
+           "highlights": full["highlights"] / 100 * 2.4, "shadows": full["shadows"] / 100 * 1.5,
            "midtones": full["midtones"] / 100,  # a stop at mid gray
-           # Whites: up to 0.6 stops at white. Blacks: light taken away at black (+100 adds
+           # Whites: up to 0.8 stops at white. Blacks: light taken away at black (+100 adds
            # it: sign turned), by the square of the slider, since a display's steps near
            # black are that much finer: 0.03 of white is level 48 of 255.
-           "whites": full["whites"] / 100 * 0.6,
+           "whites": full["whites"] / 100 * 0.8,
            "blacks": -math.copysign(0.03 * (full["blacks"] / 100) ** 2, full["blacks"]),
            "curveC": c, "curveS": s, "curveK": k,
            "hdrLift": max(0.0, white - 1) if raw else 0.0,

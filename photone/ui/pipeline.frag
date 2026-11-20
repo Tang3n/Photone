@@ -22,9 +22,9 @@ layout(std140, binding = 0) uniform buf {
     // The edit, as photone/edit.py works it out (uniforms):
     float gain;       // 2^exposure
     float mid;        // where mid gray lies: for a sensor, for a finished picture
-    float contrast;   // stops from mid gray are stretched by 1 + this
+    float contrast;   // stops from mid gray are stretched by 1 + this, round mid gray
     float brightness; // a power on the finished picture's luminance, less one
-    float highlights; // stops added at the sensor's white, fading out toward mid gray
+    float highlights; // stops added four stops above mid gray, fading out toward it
     float shadows;    // stops added in the deep shadows, fading out toward mid gray
     float midtones;   // stops added at mid gray, fading out to both sides
     float whites;     // stops added to what is shown at white, fading out toward mid gray
@@ -228,22 +228,46 @@ float grainAt(vec2 at, float shift) {
     return fine / max(1.0, max(covered.x, covered.y));
 }
 
+// 0 at 0 and 1 at 1, even between, eased in over the first three tenths: how Highlights and
+// Whites grow (edit._eased). A smoothstep flattens the middle of what it covers and leaves
+// the top as it was, which looks harsh.
+float eased(float t) {
+    t = clamp(t, 0.0, 1.0);
+    return (t < 0.3 ? t * t / 0.6 : t - 0.15) / 0.85;
+}
+
 // Develop: from what the sensor measured to a picture. All of it on scene-linear light.
 vec3 develop(vec3 c) {
     // White balance, where it belongs: as a gain on the camera's own channels.
     c = mat3(fromCam) * min((mat3(toCam) * c) * wbGain.rgb, vec3(wbGain.a));
     c = max(c, vec3(0.0)) * gain;
-    // Contrast, highlights and shadows: a gain that depends on how bright the pixel is, in
-    // stops from mid gray, so hue and saturation stay as they are.
+    // Contrast and shadows: a gain that depends on how bright the pixel is, in stops from
+    // mid gray, so hue and saturation stay as they are.
     float stops = log2(max(dot(c, LUMA), 1e-6) / mid);
-    c *= exp2(contrast * stops + shadows * (1.0 - smoothstep(-4.5, 0.5, stops))
-              + highlights * smoothstep(-0.5, 3.0, stops));
-    // Midtones (edit.tone_at): the same kind of gain, most within half a stop of mid gray
-    // and none two and a half stops from it either way. A step of its own, on what the
-    // gains above have made: each step keeps a lighter tone lighter, so both together do.
+    // (Shadows up fades out toward black, none of it eight stops under mid gray: all of it
+    // there turned the blacks milky and brought their noise up. Down, it does not.)
+    float deep = shadows > 0.0 ? smoothstep(-8.0, -3.0, stops) : 1.0;
+    // (Contrast down counts the stops from mid gray less and less toward the two ends, none
+    // at eight stops under and four and a half above: counted in full, black was lifted three
+    // stops and white taken down one and a half, a milky gray picture. Up, none at white and
+    // none eight stops under: both ends stay where they are and what lies between is steeper.
+    // Counted in full, it showed all from a stop and a half above mid gray as white.)
+    float lights = contrast < 0.0 ? smoothstep(0.5, 4.5, stops) : smoothstep(0.0, -log2(mid), stops);
+    float spread = stops * (1.0 - (stops > 0.0 ? lights : smoothstep(1.0, 8.0, -stops)));
+    c *= exp2(contrast * spread + shadows * (1.0 - smoothstep(-4.5, 0.5, stops)) * deep);
+    // Highlights: the same kind of gain, none half a stop under mid gray and all of it four
+    // stops above (the sensor's white is three above: three quarters). A step of its own, as
+    // Midtones is and for the same reason: two stops in one sum with Contrast and Shadows
+    // would show a lighter tone darker.
+    if (highlights != 0.0)
+        c *= exp2(highlights * eased((log2(max(dot(c, LUMA), 1e-6) / mid) + 0.5) / 4.5));
+    // Midtones (edit.tone_at): the same kind of gain, most at mid gray and none three and
+    // a half stops from it either way (over two stops it left a quarter of the contrast on
+    // one side and added three quarters on the other: harsh). A step of its own, on what the
+    // gains above have made: each step keeps a lighter tone lighter, so all together do.
     if (midtones != 0.0) {
         float away = abs(log2(max(dot(c, LUMA), 1e-6) / mid));
-        c *= exp2(midtones * (1.0 - smoothstep(0.5, 2.5, away)));
+        c *= exp2(midtones * (1.0 - smoothstep(0.0, 3.5, away)));
     }
     float gray = mid;  // where mid gray is shown: by the profile's curve, if there is one
     if (curveC > 0.0) {
@@ -253,12 +277,13 @@ vec3 develop(vec3 c) {
     }
     // Blacks and Whites (edit.tone_at): the two ends of what is shown, mid gray staying where
     // it is. Blacks takes light away below it (more, the nearer black: what is left of black
-    // is cut off) or adds some; Whites is a gain in stops above it (most at white). On what
+    // is cut off) or adds some; Whites is a gain in stops above it (most at white, and growing
+    // with the stops above mid gray: a photo with nothing near white is moved too). On what
     // is shown and not on what the sensor recorded: the curve squeezes the top two stops of
     // the sensor into the last few steps under white, where a gain shows as nothing.
     if (blacks != 0.0 || whites != 0.0) {
         c = max(c - blacks * (1.0 - smoothstep(0.0, gray, dot(c, LUMA))), 0.0);
-        c *= exp2(whites * smoothstep(gray, 1.0, dot(c, LUMA)));
+        c *= exp2(whites * eased(log2(max(dot(c, LUMA), 1e-6) / gray) / -log2(gray)));
     }
     // Brightness: lifts or lowers the middle and leaves black and white where they are.
     return c * pow(clamp(dot(c, LUMA), 1e-6, 1.0), brightness);
