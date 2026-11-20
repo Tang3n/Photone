@@ -2723,8 +2723,10 @@ Rectangle {
             photos = paths; folder = ""
             place(x, y)
         }
+        property real atX: 0   // where it was asked for; the card keeps inside the window from there
+        property real atY: 0
         function place(x, y) {
-            card.x = Math.min(x, width - card.width - 6); card.y = Math.min(y, height - card.height - 6)
+            atX = x; atY = y
             visible = true
             card.forceActiveFocus()
         }
@@ -2734,6 +2736,9 @@ Rectangle {
             id: card
             objectName: "modal:menu"
             width: 210; height: entries.height + 8; radius: 8
+            // (Bound, not set once: the entries shown, and so the height, change as it opens.)
+            x: Math.max(6, Math.min(menu.atX, menu.width - width - 6))
+            y: Math.max(6, Math.min(menu.atY, menu.height - height - 6))
             color: Theme.panel; border { width: 1; color: Theme.faint }
             Accessible.role: Accessible.PopupMenu; Accessible.name: menu.folder !== "" ? "Folder" : "Photo"
             Keys.onPressed: (event) => { if (event.key === Qt.Key_Escape) menu.close(); event.accepted = true }   // (its own while it is open)

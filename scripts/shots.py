@@ -3216,6 +3216,13 @@ def audit_menu() -> list[str]:
 
     row = next(n for n, photo in enumerate(shown.model.rows) if photo["edited"])
     faults.expect(not menu.isVisible(), "the photo menu is open before anything was clicked")
+    whole = menu.parentItem()  # asked for past the window's corners, the card stays inside it
+    for corner in (99999, -99999):
+        whole.setProperty("atX", corner), whole.setProperty("atY", corner), whole.setProperty("visible", True)
+        settle()
+        view.grabWindow()
+        faults.expect(QRectF(0, 0, root.width(), root.height()).contains(box(menu)), f"the menu asked for at {corner} is cut by the window: {box(menu)}")
+    whole.setProperty("visible", False)
     right(find(root, f"photo:{row}"))
     lib = find(root, "box:library")
     faults.expect(menu.isVisible() and plain(lib.property("chosen")) == [row], f"a right click on a photo of the library opens no menu, or does not select it: {plain(lib.property('chosen'))}")
