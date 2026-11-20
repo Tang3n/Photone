@@ -1929,7 +1929,7 @@ Rectangle {
                 TextButton {
                     id: wheelCompare
                     objectName: "compare:wheel"
-                    anchors { right: parent.right; rightMargin: -2 } y: Theme.cardMid - height / 2
+                    anchors { right: parent.right; rightMargin: 6 } y: Theme.cardMid - height / 2
                     text: "A/B"; says: "Compare"; strong: true; font.weight: Font.DemiBold
                     font.pixelSize: Theme.titleSize; font.letterSpacing: 0.6
                     available: wheelReset.visible

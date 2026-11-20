@@ -83,7 +83,7 @@ Column {
             // (On the head's middle line, as the title and its icon are. Not on the Crop
             // card: the owner's wish.)
             visible: panel.headed && panel.card !== "crop"
-            y: Theme.cardMid - height / 2; anchors { right: parent.right; rightMargin: -2 }
+            y: Theme.cardMid - height / 2; anchors { right: parent.right; rightMargin: 6 }
             text: "A/B"; says: "Compare"; strong: true; font.weight: Font.DemiBold
             font.pixelSize: Theme.titleSize; font.letterSpacing: 0.6
             available: panel.local ? panel.altered : session.comparable[panel.tool] === true
