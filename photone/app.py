@@ -2407,12 +2407,18 @@ class FirstFrame(QObject):
             return
         self.done = True
         self.view.frameSwapped.disconnect(self.seen)  # once is enough
+        self.view.setTitle("Photone")
         self.session.surface_known(is_hdr_surface(self.view))
 
 
 def watch_surface(view: QQuickView, session: Session) -> None:
     """After the first frame, tell the session what kind of surface the window really got.
-    Until then the interface is not drawn (it would not know how to draw its colors)."""
+    Until then the interface is not drawn (it would not know how to draw its colors).
+
+    Until then the title also says why the window may stay white: on Windows the first launch
+    turns every shader into the graphics card's code before the first frame (a few seconds;
+    Qt keeps the result, so later launches are past it at once)."""
+    view.setTitle("Photone (Compiling shaders…)")
     view.frameSwapped.connect(FirstFrame(view, session).seen, Qt.ConnectionType.QueuedConnection)
 
 
