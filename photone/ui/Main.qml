@@ -1235,11 +1235,6 @@ Rectangle {
                 LocalSlider { key: "vibrance"; name: "Vibrance"; from: -100; to: 100; step: 1; digits: 0 }
             }
             LocalCard {
-                objectName: "panel:local-eq"
-                title: "Color EQ"; card: "eq"; keys: ["eq"]; tinted: true
-                HueEditor { width: parent.width; height: 200; onDone: root.forceActiveFocus(); local: true; mask: wheel.mask; tally: counts }
-            }
-            LocalCard {
                 objectName: "panel:local-chroma"
                 title: "Chroma curve"; card: "chroma"; keys: ["chroma"]; tinted: true
                 CurveEditor {
@@ -1248,6 +1243,11 @@ Rectangle {
                     tally: counts; behind: "chroma"
                     low: "muted"; high: "vivid"
                 }
+            }
+            LocalCard {
+                objectName: "panel:local-eq"
+                title: "Color EQ"; card: "eq"; keys: ["eq"]; tinted: true
+                HueEditor { width: parent.width; height: 200; onDone: root.forceActiveFocus(); local: true; mask: wheel.mask; tally: counts }
             }
             // The cards of Adjust, in the order a photo is worked on.
             Panel {
@@ -1792,13 +1792,6 @@ Rectangle {
                 HueEditor { width: parent.width; height: 230; gray: true; onDone: root.forceActiveFocus(); tally: counts }
             }
             Panel {
-                objectName: "panel:eq"
-                id: eqPanel
-                title: "Color EQ"; tool: "eq"; card: "eq"; visible: session.source !== "" && root.shows("eq")
-                folds: true; open: root.isOpen("eq"); onFold: root.fold("eq")
-                HueEditor { width: parent.width; height: 220; onDone: root.forceActiveFocus(); tally: counts }
-            }
-            Panel {
                 objectName: "panel:chroma"
                 id: chromaPanel
                 title: "Chroma curve"; tool: "chroma"; card: "chroma"; visible: session.source !== "" && root.shows("chroma")
@@ -1808,6 +1801,13 @@ Rectangle {
                     key: "chroma"; line: session.chromaLine; tally: counts; behind: "chroma"
                     low: "muted"; high: "vivid"
                 }
+            }
+            Panel {
+                objectName: "panel:eq"
+                id: eqPanel
+                title: "Color EQ"; tool: "eq"; card: "eq"; visible: session.source !== "" && root.shows("eq")
+                folds: true; open: root.isOpen("eq"); onFold: root.fold("eq")
+                HueEditor { width: parent.width; height: 220; onDone: root.forceActiveFocus(); tally: counts }
             }
             // The pin being worked on, as numbers: everything the wheel does by gesture, and
             // what has no gesture (its kind, its span of lightness).
