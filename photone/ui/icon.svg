@@ -1,7 +1,77 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <rect width="64" height="64" rx="14" fill="#18181a"/>
-  <circle cx="32" cy="32" r="19" fill="none" stroke="#e4e4e6" stroke-width="3"/>
-  <path d="M32 32 L43 21" stroke="#e4e4e6" stroke-width="3" stroke-linecap="round"/>
-  <circle cx="44" cy="20" r="6" fill="#e2a55a"/>
-  <circle cx="32" cy="32" r="2.5" fill="#e4e4e6"/>
+  <path d="M50.50 32.00 A18.5 18.5 0 0 0 50.40 30.07" fill="none" stroke="#fd8c7f" stroke-width="7.5"/>
+  <path d="M50.43 30.39 A18.5 18.5 0 0 0 50.16 28.47" fill="none" stroke="#fd8d77" stroke-width="7.5"/>
+  <path d="M50.22 28.79 A18.5 18.5 0 0 0 49.78 26.90" fill="none" stroke="#fc8f6e" stroke-width="7.5"/>
+  <path d="M49.87 27.21 A18.5 18.5 0 0 0 49.27 25.37" fill="none" stroke="#fa9166" stroke-width="7.5"/>
+  <path d="M49.38 25.67 A18.5 18.5 0 0 0 48.63 23.89" fill="none" stroke="#f8935e" stroke-width="7.5"/>
+  <path d="M48.77 24.18 A18.5 18.5 0 0 0 47.86 22.47" fill="none" stroke="#f69656" stroke-width="7.5"/>
+  <path d="M48.02 22.75 A18.5 18.5 0 0 0 46.97 21.13" fill="none" stroke="#f3984f" stroke-width="7.5"/>
+  <path d="M47.15 21.39 A18.5 18.5 0 0 0 45.96 19.86" fill="none" stroke="#ef9b48" stroke-width="7.5"/>
+  <path d="M46.17 20.11 A18.5 18.5 0 0 0 44.85 18.69" fill="none" stroke="#eb9e41" stroke-width="7.5"/>
+  <path d="M45.08 18.92 A18.5 18.5 0 0 0 43.64 17.62" fill="none" stroke="#e7a13b" stroke-width="7.5"/>
+  <path d="M43.89 17.83 A18.5 18.5 0 0 0 42.35 16.66" fill="none" stroke="#e2a437" stroke-width="7.5"/>
+  <path d="M42.61 16.85 A18.5 18.5 0 0 0 40.97 15.82" fill="none" stroke="#dca733" stroke-width="7.5"/>
+  <path d="M41.25 15.98 A18.5 18.5 0 0 0 39.52 15.10" fill="none" stroke="#d7ab32" stroke-width="7.5"/>
+  <path d="M39.82 15.23 A18.5 18.5 0 0 0 38.02 14.51" fill="none" stroke="#d0ae32" stroke-width="7.5"/>
+  <path d="M38.33 14.62 A18.5 18.5 0 0 0 36.48 14.05" fill="none" stroke="#cab134" stroke-width="7.5"/>
+  <path d="M36.79 14.13 A18.5 18.5 0 0 0 34.89 13.73" fill="none" stroke="#c2b438" stroke-width="7.5"/>
+  <path d="M35.21 13.78 A18.5 18.5 0 0 0 33.29 13.55" fill="none" stroke="#bbb73d" stroke-width="7.5"/>
+  <path d="M33.61 13.57 A18.5 18.5 0 0 0 31.68 13.50" fill="none" stroke="#b3ba44" stroke-width="7.5"/>
+  <path d="M32.00 13.50 A18.5 18.5 0 0 0 30.07 13.60" fill="none" stroke="#aabc4b" stroke-width="7.5"/>
+  <path d="M30.39 13.57 A18.5 18.5 0 0 0 28.47 13.84" fill="none" stroke="#a1bf52" stroke-width="7.5"/>
+  <path d="M28.79 13.78 A18.5 18.5 0 0 0 26.90 14.22" fill="none" stroke="#98c15a" stroke-width="7.5"/>
+  <path d="M27.21 14.13 A18.5 18.5 0 0 0 25.37 14.73" fill="none" stroke="#8ec462" stroke-width="7.5"/>
+  <path d="M25.67 14.62 A18.5 18.5 0 0 0 23.89 15.37" fill="none" stroke="#84c66b" stroke-width="7.5"/>
+  <path d="M24.18 15.23 A18.5 18.5 0 0 0 22.47 16.14" fill="none" stroke="#79c773" stroke-width="7.5"/>
+  <path d="M22.75 15.98 A18.5 18.5 0 0 0 21.13 17.03" fill="none" stroke="#6ec97c" stroke-width="7.5"/>
+  <path d="M21.39 16.85 A18.5 18.5 0 0 0 19.86 18.04" fill="none" stroke="#62ca85" stroke-width="7.5"/>
+  <path d="M20.11 17.83 A18.5 18.5 0 0 0 18.69 19.15" fill="none" stroke="#56cb8e" stroke-width="7.5"/>
+  <path d="M18.92 18.92 A18.5 18.5 0 0 0 17.62 20.36" fill="none" stroke="#48cc96" stroke-width="7.5"/>
+  <path d="M17.83 20.11 A18.5 18.5 0 0 0 16.66 21.65" fill="none" stroke="#38cd9f" stroke-width="7.5"/>
+  <path d="M16.85 21.39 A18.5 18.5 0 0 0 15.82 23.03" fill="none" stroke="#25cda8" stroke-width="7.5"/>
+  <path d="M15.98 22.75 A18.5 18.5 0 0 0 15.10 24.48" fill="none" stroke="#04cdb0" stroke-width="7.5"/>
+  <path d="M15.23 24.18 A18.5 18.5 0 0 0 14.51 25.98" fill="none" stroke="#00cdb9" stroke-width="7.5"/>
+  <path d="M14.62 25.67 A18.5 18.5 0 0 0 14.05 27.52" fill="none" stroke="#00cdc1" stroke-width="7.5"/>
+  <path d="M14.13 27.21 A18.5 18.5 0 0 0 13.73 29.11" fill="none" stroke="#00ccc9" stroke-width="7.5"/>
+  <path d="M13.78 28.79 A18.5 18.5 0 0 0 13.55 30.71" fill="none" stroke="#00cbd0" stroke-width="7.5"/>
+  <path d="M13.57 30.39 A18.5 18.5 0 0 0 13.50 32.32" fill="none" stroke="#00cad8" stroke-width="7.5"/>
+  <path d="M13.50 32.00 A18.5 18.5 0 0 0 13.60 33.93" fill="none" stroke="#00c9de" stroke-width="7.5"/>
+  <path d="M13.57 33.61 A18.5 18.5 0 0 0 13.84 35.53" fill="none" stroke="#00c7e5" stroke-width="7.5"/>
+  <path d="M13.78 35.21 A18.5 18.5 0 0 0 14.22 37.10" fill="none" stroke="#00c6eb" stroke-width="7.5"/>
+  <path d="M14.13 36.79 A18.5 18.5 0 0 0 14.73 38.63" fill="none" stroke="#09c4f1" stroke-width="7.5"/>
+  <path d="M14.62 38.33 A18.5 18.5 0 0 0 15.37 40.11" fill="none" stroke="#27c2f6" stroke-width="7.5"/>
+  <path d="M15.23 39.82 A18.5 18.5 0 0 0 16.14 41.53" fill="none" stroke="#39bffb" stroke-width="7.5"/>
+  <path d="M15.98 41.25 A18.5 18.5 0 0 0 17.03 42.87" fill="none" stroke="#47bdff" stroke-width="7.5"/>
+  <path d="M16.85 42.61 A18.5 18.5 0 0 0 18.04 44.14" fill="none" stroke="#54baff" stroke-width="7.5"/>
+  <path d="M17.83 43.89 A18.5 18.5 0 0 0 19.15 45.31" fill="none" stroke="#60b8ff" stroke-width="7.5"/>
+  <path d="M18.92 45.08 A18.5 18.5 0 0 0 20.36 46.38" fill="none" stroke="#6cb5ff" stroke-width="7.5"/>
+  <path d="M20.11 46.17 A18.5 18.5 0 0 0 21.65 47.34" fill="none" stroke="#76b2ff" stroke-width="7.5"/>
+  <path d="M21.39 47.15 A18.5 18.5 0 0 0 23.03 48.18" fill="none" stroke="#80b0ff" stroke-width="7.5"/>
+  <path d="M22.75 48.02 A18.5 18.5 0 0 0 24.48 48.90" fill="none" stroke="#8aadff" stroke-width="7.5"/>
+  <path d="M24.18 48.77 A18.5 18.5 0 0 0 25.98 49.49" fill="none" stroke="#93aaff" stroke-width="7.5"/>
+  <path d="M25.67 49.38 A18.5 18.5 0 0 0 27.52 49.95" fill="none" stroke="#9ca7ff" stroke-width="7.5"/>
+  <path d="M27.21 49.87 A18.5 18.5 0 0 0 29.11 50.27" fill="none" stroke="#a4a4ff" stroke-width="7.5"/>
+  <path d="M28.79 50.22 A18.5 18.5 0 0 0 30.71 50.45" fill="none" stroke="#aca2ff" stroke-width="7.5"/>
+  <path d="M30.39 50.43 A18.5 18.5 0 0 0 32.32 50.50" fill="none" stroke="#b49fff" stroke-width="7.5"/>
+  <path d="M32.00 50.50 A18.5 18.5 0 0 0 33.93 50.40" fill="none" stroke="#bb9dfe" stroke-width="7.5"/>
+  <path d="M33.61 50.43 A18.5 18.5 0 0 0 35.53 50.16" fill="none" stroke="#c29afa" stroke-width="7.5"/>
+  <path d="M35.21 50.22 A18.5 18.5 0 0 0 37.10 49.78" fill="none" stroke="#c998f6" stroke-width="7.5"/>
+  <path d="M36.79 49.87 A18.5 18.5 0 0 0 38.63 49.27" fill="none" stroke="#cf96f1" stroke-width="7.5"/>
+  <path d="M38.33 49.38 A18.5 18.5 0 0 0 40.11 48.63" fill="none" stroke="#d593eb" stroke-width="7.5"/>
+  <path d="M39.82 48.77 A18.5 18.5 0 0 0 41.53 47.86" fill="none" stroke="#db91e5" stroke-width="7.5"/>
+  <path d="M41.25 48.02 A18.5 18.5 0 0 0 42.87 46.97" fill="none" stroke="#e090df" stroke-width="7.5"/>
+  <path d="M42.61 47.15 A18.5 18.5 0 0 0 44.14 45.96" fill="none" stroke="#e58ed8" stroke-width="7.5"/>
+  <path d="M43.89 46.17 A18.5 18.5 0 0 0 45.31 44.85" fill="none" stroke="#e98dd1" stroke-width="7.5"/>
+  <path d="M45.08 45.08 A18.5 18.5 0 0 0 46.38 43.64" fill="none" stroke="#ed8bc9" stroke-width="7.5"/>
+  <path d="M46.17 43.89 A18.5 18.5 0 0 0 47.34 42.35" fill="none" stroke="#f18ac1" stroke-width="7.5"/>
+  <path d="M47.15 42.61 A18.5 18.5 0 0 0 48.18 40.97" fill="none" stroke="#f48aba" stroke-width="7.5"/>
+  <path d="M48.02 41.25 A18.5 18.5 0 0 0 48.90 39.52" fill="none" stroke="#f789b1" stroke-width="7.5"/>
+  <path d="M48.77 39.82 A18.5 18.5 0 0 0 49.49 38.02" fill="none" stroke="#f989a9" stroke-width="7.5"/>
+  <path d="M49.38 38.33 A18.5 18.5 0 0 0 49.95 36.48" fill="none" stroke="#fb89a1" stroke-width="7.5"/>
+  <path d="M49.87 36.79 A18.5 18.5 0 0 0 50.27 34.89" fill="none" stroke="#fc8998" stroke-width="7.5"/>
+  <path d="M50.22 35.21 A18.5 18.5 0 0 0 50.45 33.29" fill="none" stroke="#fd8a90" stroke-width="7.5"/>
+  <path d="M50.43 33.61 A18.5 18.5 0 0 0 50.50 31.68" fill="none" stroke="#fe8b88" stroke-width="7.5"/>
+  <circle cx="45.08" cy="18.92" r="10" fill="#18181a"/>
+  <circle cx="45.08" cy="18.92" r="7" fill="#e4e4e6" />
 </svg>
