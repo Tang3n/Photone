@@ -554,7 +554,6 @@ SHOTS = {
     "mono-masks": (SMALL, photo, lambda root, session: (session.setEdit("mono", True), masked(OVAL)(root, session))),
     "detail": (BIG, photo, lambda root, session: (
         session.setEdits({"sharpen": 60.0, "sharpenMask": 40.0, "denoise": 50.0, "denoiseColor": 60.0}), show(root, "detail"))),
-    "detail-neural": (BIG, photo, lambda root, session: (root.setProperty("neural", True), show(root, "detail"))),
     "detail-denoised": (BIG, photo, lambda root, session: (
         setattr(session, "_denoised", True), session.refresh(), show(root, "detail"))),
     "denoise-working": (BIG, photo, lambda root, session: neural(root, session, "working", 0.42)),
