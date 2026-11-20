@@ -314,14 +314,16 @@ def check_no_orphan() -> None:
 
 
 CAMERA = decode.synthetic(8, 4)[0]["camera"]  # a real camera's figures
+ON = catalog.LENS_ON  # what an edit kept before the lens corrections were off at rest says
+THEN = {**ON, "curve": edit.STRAIGHT}  # and one of a raw file, kept before its curve was its own
 
 
 def check_edit_values() -> None:
     """What may enter an edit (photone/edit.py)."""
     assert edit.valid("exposure", 9) == 5.0 and edit.valid("tint", -999) == -150.0, "kept in range"
     assert edit.valid("temperature", None) is None, "None is 'as shot'"
-    assert edit.valid("exposure", None) is None, "None is 'where this photo starts'"
-    for key, bad in (("exposure", "1"), ("exposure", float("nan")), ("contrast", None),
+    assert edit.valid("curve", None) is None, "None is 'the photo's own'"
+    for key, bad in (("exposure", None), ("exposure", "1"), ("exposure", float("nan")), ("contrast", None),
                      ("exposure", True), ("profile", "vivid"), ("sharpness", 1)):
         try:
             edit.valid(key, bad)
@@ -335,7 +337,8 @@ def check_edit_values() -> None:
     # A tone curve: points left to right, kept in 0..1, the same after a trip through JSON.
     curve = edit.valid("curve", ((0, 0), (0.5, 1.4), (1, 1)))
     assert curve == [[0.0, 0.0], [0.5, 1.0], [1.0, 1.0]] and json.loads(json.dumps(curve)) == curve
-    assert edit.clean({"curve": edit.STRAIGHT}) == {}, "the straight line is no edit"
+    assert edit.clean({"curve": edit.STRAIGHT}) == {"curve": edit.STRAIGHT}, "straight is a choice: a raw file's own curve is not"
+    assert edit.clean({"curve": None, "exposure": 0}) == {}, "at rest: the photo's own, as shot"
     for bad in ([[0, 0]], [[0, 0], [0.5, 0.5], [0.5, 0.6], [1, 1]], [[0.6, 0], [0.4, 1]], "x",
                 [[0, 0], [1, "1"]], [[0, 0, 0], [1, 1, 1]], [[i / 20, 0] for i in range(17)]):
         assert edit.clean({"curve": bad}) == {}, f"curve {bad!r} must be refused"
@@ -683,17 +686,19 @@ def check_lens() -> None:
     assert fringed["lensGreen"] == [1.0] * 16 and abs(fringed["lensRed"][5] - (1 + 256 * 2 ** -21)) < 1e-12 and fringed["lensBlue"][5] < 1
     lit = lens.tables(found, False, False, True)
     assert lit["lensLight"][0] == 1 and abs(lit["lensLight"][-1] - 2 ** (2 ** (lens._at(dim, 1.0) * 2 ** -13 - 1) - 0.5)) < 1e-12 and lit["lensLight"][-1] > 1.3
-    u = edit.uniforms({"lensColor": False}, {**edit.FINISHED, "lens": found}, False, shape=1.5)
+    u = edit.uniforms({**catalog.LENS_ON, "lensColor": False}, {**edit.FINISHED, "lens": found}, False, shape=1.5)
     assert u["lensOn"] == 1 and u["lensShape"] == 1.5 and u["lensGreen"] == bent["lensGreen"] == u["lensRed"] and u["lensLight"] == lit["lensLight"]
     whole = edit.uniforms({}, {**edit.FINISHED, "lens": found}, False, shape=1.5)
-    assert whole["lensOn"] == 1 and whole["lensRed"] != whole["lensGreen"] == bent["lensGreen"], "all three are on until switched off"
+    assert whole["lensOn"] == 0, "all three are off until switched on"
+    whole = edit.uniforms(catalog.LENS_ON, {**edit.FINISHED, "lens": found}, False, shape=1.5)
+    assert whole["lensOn"] == 1 and whole["lensRed"] != whole["lensGreen"] == bent["lensGreen"]
     assert edit.uniforms({}, None, True)["lensOn"] == 0, "no figures: nothing is done, whatever is switched on"
     # Defringe, for any file: a share of 1, and nothing of it without the picture's size.
     assert edit.uniforms({"defringe": 40.0}, None, True, shape=1.5, wide=6000)["defringe"] == 0.4
     assert edit.uniforms({"defringe": 40.0}, None, True)["defringe"] == 0, "without the picture's size: no defringe"
     assert set(edit.TOOLS["lens"]) == {"lensDistortion", "lensColor", "lensVignetting", "defringe"}
     assert edit.clean({"defringe": 30, "caRed": 50.0, "defringePurple": 40.0}) == {"defringe": 30.0}, "the sliders there were before are not known any more"
-    assert edit.clean({"lensDistortion": True, "lensColor": "yes", "lensVignetting": False}) == {"lensVignetting": False}
+    assert edit.clean({"lensDistortion": True, "lensColor": "yes", "lensVignetting": False}) == {"lensDistortion": True}
 
 
 def check_mark() -> None:
@@ -1098,7 +1103,7 @@ def check_history() -> None:
     assert h.step(-1) and h.edit["tint"] == 5.0 and h.step(-1) and "tint" not in h.edit
     assert h.step(-1) and h.edit == {"shadows": 10.0} and not h.step(-1), "back to the start"
     assert h.step(1) and h.edit["exposure"] == 0.3
-    h.set("exposure", None)
+    h.set("exposure", 0.0)
     assert h.edit == {"shadows": 10.0} and len(h.states) == 3, "a new change ends the redo"
     h.commit()
     h.set("shadows", 50)
@@ -1218,9 +1223,9 @@ def check_catalog_before_checkpoints() -> None:
         old.close()
         for _ in range(2):  # opening it again changes nothing more
             kept = catalog.Catalog(path)
-            assert kept.load("c1:aa:1", Path("/a.arw")) == {"exposure": 1.5}
+            assert kept.load("c1:aa:1", Path("/a.arw")) == {"exposure": 1.5, **THEN}
             assert kept.checkpoints("c1:aa:1") == []
-            kept.save("c1:aa:1", Path("/a.arw"), {"exposure": 1.5}, [])
+            kept.save("c1:aa:1", Path("/a.arw"), {"exposure": 1.5, **THEN}, [])
             kept.close()
 
 
@@ -1324,26 +1329,18 @@ def check_copies_and_moves() -> None:
 
 
 def check_start() -> None:
-    """Where a photo's exposure starts (edit.exposure_of): as much lighter than it was shot as
-    the picture has room for, whatever the camera was set to; never lower, never by more than
-    two stops; in the session (where the slider rests there), in a thumbnail (by the preview's
-    own figures); a finished picture and a sensor whose figures are not known start as shot."""
-    def start(light, **camera) -> float:
-        return edit.exposure_of({"exposure": None}, {**CAMERA, **camera, "light": light})
-
-    roomy = [0.02, 0.1]  # the picture's middle and its top (decode.light_of), as shares of the sensor's white
-    assert start(roomy) == 1.58, "as far as its middle at 0.06: log2(0.06 / 0.02)"
-    assert start(roomy, bias=-0.3) == 1.58 and start(roomy, bias=2.0) == 1.58, "whatever the camera was set to"
-    assert start([0.01, 0.4]) == 0.32, "no further than its top at half of white: log2(0.5 / 0.4)"
-    assert start([0.2, 1.0]) == 0 and start([0.1, 0.3]) == 0 and start([0.06, 0.2]) == 0, "a light picture, or one at the sensor's white: as shot"
-    assert start([0.0001, 0.001]) == 2.0 and start([0.014, 0.02]) == 2.0, "a night: never more than two stops"
-    assert start(None) == 0 and edit.exposure_of({"exposure": None}, None) == 0, "figures not known: as shot"
-    camera = {**CAMERA, "light": [0.04, 0.1]}
-    assert edit.exposure_of({"exposure": None}, camera) == 0.58 and edit.exposure_of({"exposure": 0.0}, camera) == 0.0
-    assert abs(edit.uniforms({}, camera, True)["gain"] - 2 ** 0.58) < 1e-9 and edit.uniforms({"exposure": 0.0}, camera, True)["gain"] == 1
-    assert edit.clean({"exposure": 0}) == {"exposure": 0.0}, "an Exposure of 0 is a choice now, and kept"
-    for shown in (0.0, 0.01, 0.32, 0.9, 1.0):
-        assert abs(float(edit.tone_at(edit.sensed(shown), edit.uniforms({"exposure": 0.0}, None, True))) - shown) < 1e-9, "the curve read backwards"
+    """Where a photo starts (edit.curve_of): Exposure at 0, as shot, for every photo; the tone
+    curve at a raw file's own (`match`, made at decode), straight where there is none. In the
+    session (the curve editor shows it once the file is decoded, reset is back there, straight
+    is a choice that is kept, the Exposure card's A/B shows it straight), and in a thumbnail
+    (the camera's preview as it is)."""
+    own = [[0.0, 0.0], [0.25, 0.32], [0.6, 0.66], [1.0, 1.0]]
+    camera = {**CAMERA, "match": own}
+    assert edit.curve_of({}, camera) == own and edit.curve_of({"curve": edit.STRAIGHT}, camera) == edit.STRAIGHT
+    assert edit.curve_of({}, CAMERA) == edit.curve_of({}, None) == edit.STRAIGHT, "no curve of its own: straight"
+    at_rest = edit.uniforms({}, camera, True)
+    assert at_rest["gain"] == 1 and at_rest["curveOn"] == 1 and at_rest == edit.uniforms({"curve": own}, camera, True)
+    assert edit.uniforms({}, CAMERA, True)["curveOn"] == 0
     with tempfile.TemporaryDirectory() as folder:
         dark = Path(folder) / "dark.arw"
         dark.write_bytes(exif("SONY", "ILCE-7M4", "2026:07:04 13:35:44", 1, -2.0) + np.random.default_rng(5).bytes(200_000))
@@ -1355,62 +1352,52 @@ def check_start() -> None:
         wild.write_bytes(exif("X", "Y", "2026:07:04 13:35:44", 1, 300.0))
         assert library.describe(wild)["bias"] == 0, "a compensation no camera has is not believed"
 
-        def thumb_of(level: int, name: str) -> int:  # the gray of the thumbnail of a raw file whose preview is that gray
-            gray = QImage(64, 48, QImage.Format.Format_RGB32)
-            gray.fill(QColor(level, level, level))
-            carried, library._preview = library._preview, lambda photo: gray
-            try:
-                return QImage(str(library.thumbnail(dark, name, Path(folder) / "cache"))).pixelColor(30, 20).green()
-            finally:
-                library._preview = carried
-
-        gray = QImage(8, 8, QImage.Format.Format_RGB32)
+        gray = QImage(64, 48, QImage.Format.Format_RGB32)
         gray.fill(QColor(64, 64, 64))
-        middle, top = library.light_in(gray)
-        assert abs(middle - 0.033) < 0.002 and abs(top - middle) < 1e-6, f"a preview's gray of 64 was recorded at 0.033 of white, not {middle:.4f}"
-        lamp = QImage(64, 48, QImage.Format.Format_RGB32)
-        lamp.fill(QColor(64, 64, 64))
-        for x in range(60):  # 120 of 3072 pixels, four hundredths: not its top
-            lamp.setPixelColor(x, 0, QColor(255, 255, 255))
-            lamp.setPixelColor(x, 1, QColor(255, 255, 255))
-        assert abs(library.light_in(lamp)[1] - middle) < 1e-6, "a few bright pixels are not a preview's top"
-        assert 84 <= thumb_of(64, "c1:dark:1") <= 88, "a preview with room for 0.86 stops: the thumbnail is that much lighter (86)"
-        assert 198 <= thumb_of(200, "c1:dark:2") <= 202, "a light preview: the thumbnail is the preview"
+        carried, library._preview = library._preview, lambda photo: gray
+        try:
+            made = QImage(str(library.thumbnail(dark, "c1:dark:1", Path(folder) / "cache")))
+        finally:
+            library._preview = carried
+        assert 62 <= made.pixelColor(30, 20).green() <= 66, "an unedited raw file's thumbnail is its preview as it is"
 
         def some(path: Path, half: bool = True):  # the chart, as a raw file or as a finished picture
             meta, pixels = chart(path, half)
-            return {**meta, "raw": path.suffix == ".arw", "light": {"dark.arw": roomy, "plain.arw": [0.07, 0.3]}.get(path.name)}, pixels
+            return {**meta, "raw": path.suffix == ".arw", "match": {"dark.arw": own}.get(path.name)}, pixels
 
         session = app.Session([dark, plain, told], load=some)
+        shown = []
+        session.curveChanged.connect(lambda: shown.append(session.curve))
         session.image(session.source.removeprefix("image://photo/"))
         QCoreApplication.processEvents()
-        assert session.shot["exposure"] == 1.58 and session.edit["exposure"] == 1.58 and session.history.edit == {}
-        # Yellow (unsaved) by what it comes to: where it starts, yes; set to 0 by hand, no.
-        assert "exposure" in session.unsavedKeys, "a start above 0 is a change no checkpoint holds"
-        session.setEdit("exposure", 0.0)
-        assert "exposure" not in session.unsavedKeys, "at 0 the slider is at its rest"
+        assert shown and shown[-1] == own, "the curve editor is told when the photo's own curve is there"
+        assert session.shot["curve"] == session.edit["curve"] == session.curve == own and session.history.edit == {}
+        assert session.edit["exposure"] == 0 and session.uniforms["gain"] == 1 and session.unsavedKeys == []
+        assert session.curveLine == edit.curve_line(own)
+        assert session.localWhole(1, "curve") == edit.STRAIGHT and session.localLine(1, "curve") == edit.curve_line(edit.STRAIGHT), \
+            "a mask's own curve starts straight, on top of the photo's own"
+        assert session.comparable["tone"] and not session.adjusted["tone"], "at rest, a curve to compare and no change"
+        session.setBypass("tone")
+        assert session.uniforms["curveOn"] == 0, "the Exposure card's A/B: the curve straight, as shot"
+        session.setBypass("")
+        session.setEdit("curve", edit.STRAIGHT)
+        assert session.history.edit == {"curve": edit.STRAIGHT} and session.curve == edit.STRAIGHT and "curve" in session.unsavedKeys
+        session.setEdit("curve", own)
+        assert session.history.edit == {}, "set to the photo's own curve: at rest again"
+        session.resetTool("tone")
+        assert session.history.edit == {} and session.curve == own, "reset is back to the photo's own curve"
         session.setEdit("exposure", 0.5)
-        assert "exposure" in session.unsavedKeys
-        session.resetAll()
-        assert abs(session.uniforms["gain"] - 2 ** 1.58) < 1e-9, "with room for 1.58 stops, the photo does not start there"
+        assert session.unsavedKeys == ["exposure"]
         session.setEdit("exposure", 0.0)
-        assert session.history.edit == {"exposure": 0.0} and session.uniforms["gain"] == 1.0
-        session.resetEdit("exposure")
-        assert session.history.edit == {} and session.edit["exposure"] == 1.58, "reset is back where the photo starts, not at 0"
-        session.step(1)
-        session.image(session.source.removeprefix("image://photo/"))
-        QCoreApplication.processEvents()
-        assert session.shot["exposure"] == 0 and session.uniforms["gain"] == 1.0, "a photo that is light already starts as shot"
-        session.step(1)
-        session.image(session.source.removeprefix("image://photo/"))
-        QCoreApplication.processEvents()
-        assert session.shot["exposure"] == 0 and session.uniforms["gain"] == 1.0, "a finished picture is left as it was made"
-    gray = QImage(4, 2, QImage.Format.Format_RGB32)
-    gray.fill(QColor(64, 64, 64))
-    up, down = library.lifted(gray, 1.0), library.lifted(gray, -1.0)
-    assert (up.width(), up.height()) == (4, 2) and 86 <= up.pixelColor(1, 1).green() <= 90, up.pixelColor(1, 1).green()
-    assert 44 <= down.pixelColor(3, 0).red() <= 48 and library.lifted(gray, 9.0).pixelColor(0, 0).blue() == 255
-    assert library.lifted(gray, 0.0) is gray, "nothing to do: the same picture"
+        assert session.history.edit == {} and session.unsavedKeys == [], "at 0 Exposure is at rest"
+        for _ in range(2):  # a raw file with no curve of its own, then a finished picture: straight
+            session.step(1)
+            session.image(session.source.removeprefix("image://photo/"))
+            QCoreApplication.processEvents()
+            assert session.curve == edit.STRAIGHT and shown[-1] == edit.STRAIGHT and session.uniforms["curveOn"] == 0
+            session.setEdit("curve", [[0.0, 0.0], [1.0, 1.0]])
+            assert session.history.edit == {}, "straight, where that is the photo's own: no change"
+            assert not session.comparable["tone"]
 
 
 def check_light() -> None:
@@ -1451,8 +1438,8 @@ def check_light() -> None:
         photos = [{"key": "c1:a:1", "kind": "raw", "edited": False}, {"key": "c1:b:1", "kind": "raw", "edited": True},
                   {"key": "c1:c:1", "kind": "jpeg", "edited": False}]
         library.forget_starts(cache, [])
-        assert cache.is_dir() and (cache / ".starts-3").exists(), "a new cache folder is marked: nothing in it is old"
-        (cache / ".starts-3").unlink()
+        assert cache.is_dir() and (cache / ".starts-5").exists(), "a new cache folder is marked: nothing in it is old"
+        (cache / ".starts-5").unlink()
         files = [cache / f"{library.thumb_name(p['key'])}.jpg" for p in photos]
         for file in files:
             file.write_bytes(b"old")
@@ -1481,11 +1468,11 @@ def check_catalog_before_compensation() -> None:
         old.close()
         for _ in range(2):
             kept = catalog.Catalog(path)
-            assert kept.load("c1:aa:1", Path("/c1:aa:1.arw")) == {"contrast": 30.0, "exposure": 0.0}, "an edit of before keeps its 0"
-            assert kept.load("c1:bb:1", Path("/c1:bb:1.arw")) == {"exposure": 1.5}
+            assert kept.load("c1:aa:1", Path("/c1:aa:1.arw")) == {"contrast": 30.0, **THEN}, "an edit of before keeps its 0 (at rest now), its straight curve and the lens corrections it had"
+            assert kept.load("c1:bb:1", Path("/c1:bb:1.arw")) == {"exposure": 1.5, **THEN}
             assert kept.load("c1:cc:1", Path("/c1:cc:1.arw")) == {}, "a photo with no edit takes the new start"
             assert kept.load("c1:dd:1", Path("/c1:dd:1.arw")) == {}
-            assert [p["edit"] for p in kept.checkpoints("c1:aa:1")] == [{"shadows": 20.0, "exposure": 0.0}, {"exposure": -1.0}]
+            assert [p["edit"] for p in kept.checkpoints("c1:aa:1")] == [{"shadows": 20.0, **THEN}, {"exposure": -1.0, **THEN}]
             kept.close()
         copy = sqlite3.connect(path.with_name("catalog.db.v2"))
         assert copy.execute("SELECT edit FROM edits WHERE key = 'c1:aa:1'").fetchone()[0] == '{"contrast": 30.0}', "as it was before"
@@ -1510,10 +1497,10 @@ def check_catalog_before_compensation() -> None:
         for _ in range(2):
             kept = catalog.Catalog(path)
             edits = {key: json.loads(kept.db.execute("SELECT edit FROM edits WHERE key = ?", (key,)).fetchone()[0]) for key, *_ in rows}
-            assert edits["c1:aa:1"] == {"contrast": 30.0, "exposure": 1.3}, "an edit of version 3 keeps the start it had"
-            assert edits["c1:bb:1"] == {"exposure": 0.2} and edits["c1:cc:1"] == {}, "a named Exposure stays; no edit takes the new start"
-            assert edits["c1:dd:1"] == edits["c1:ee:1"] == edits["c1:ff:1"] == {"contrast": 30.0}, "a file that is gone, a finished picture, no path: left alone"
-            assert [p["edit"] for p in kept.checkpoints("c1:aa:1")] == [{"shadows": 20.0, "exposure": 1.3}]
+            assert edits["c1:aa:1"] == {"contrast": 30.0, "exposure": 1.3, **THEN}, "an edit of version 3 keeps the start it had"
+            assert edits["c1:bb:1"] == {"exposure": 0.2, **THEN} and edits["c1:cc:1"] == {}, "a named Exposure stays; no edit takes the new start"
+            assert edits["c1:dd:1"] == {"contrast": 30.0, **THEN} and edits["c1:ee:1"] == edits["c1:ff:1"] == {"contrast": 30.0}, "a file that is gone, a finished picture, no path: left alone"
+            assert [p["edit"] for p in kept.checkpoints("c1:aa:1")] == [{"shadows": 20.0, "exposure": 1.3, **THEN}]
             kept.close()
         assert path.with_name("catalog.db.v3").exists(), "the file as it was is kept beside it"
     # And one of version 4, where the compensation was taken back as far as the picture had
@@ -1534,9 +1521,67 @@ def check_catalog_before_compensation() -> None:
         finally:
             catalog._held_back = asked
         edits = {key: json.loads(stored) for key, stored in kept.db.execute("SELECT key, edit FROM edits")}
-        assert edits == {"c1:aa:1": {"contrast": 30.0, "exposure": 0.45}, "c1:bb:1": {"exposure": 0.2},
-                         "c1:cc:1": {"contrast": 30.0}, "c1:dd:1": {}}, f"edits of version 4 keep the start they had: {edits}"
-        assert kept.db.execute("PRAGMA user_version").fetchone()[0] == catalog.VERSION == 5 and path.with_name("catalog.db.v4").exists()
+        assert edits == {"c1:aa:1": {"contrast": 30.0, "exposure": 0.45, **THEN}, "c1:bb:1": {"exposure": 0.2, **THEN},
+                         "c1:cc:1": {"contrast": 30.0, **THEN}, "c1:dd:1": {}}, f"edits of version 4 keep the start they had: {edits}"
+        assert kept.db.execute("PRAGMA user_version").fetchone()[0] == catalog.VERSION == 7 and path.with_name("catalog.db.v4").exists()
+        kept.close()
+    # And one of version 5, where Exposure started by the picture alone (`_start_5`), the
+    # curve was straight and the lens corrections on unless an edit said otherwise: edits,
+    # checkpoints and kept undo steps of raw files say so now; a finished picture's say
+    # nothing new (they started at 0, straight and uncorrected then as now).
+    assert catalog._start_5([0.02, 0.1]) == 1.58 and catalog._start_5([0.01, 0.4]) == 0.32, "its middle at 0.06, its top at half of white"
+    assert catalog._start_5([0.2, 1.0]) == 0 and catalog._start_5([0.0001, 0.001]) == 2.0 and catalog._start_5(None) == 0
+    assert catalog._by_picture(None) is None and catalog._by_picture("/no/such/file.arw") is None and catalog._by_picture("/a/picture.jpg") is None
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "catalog.db"
+        catalog.Catalog(path).close()
+        old = sqlite3.connect(path)
+        points = json.dumps([{"id": 1, "name": "One", "made": 5.0, "edit": {}}])
+        with old:
+            for key, where, stored, marks in (("c1:aa:1", "/there.arw", '{"contrast": 30.0}', points), ("c1:bb:1", "/there.arw", '{"lensColor": false, "exposure": 0.0}', "[]"),
+                                              ("c1:cc:1", "/there.arw", "{}", "[]"), ("c1:dd:1", "/done.jpg", '{"contrast": 30.0}', "[]")):
+                old.execute("INSERT INTO edits VALUES (?, ?, ?, ?, 1, ?)", (key, key.split(":")[1], where, stored, marks))
+            old.execute("INSERT INTO steps VALUES ('c1:aa:1', ?, 1)", (json.dumps([{}, {"contrast": 30.0}]),))
+            old.execute("PRAGMA user_version=5")
+        old.close()
+        asked, catalog._by_picture = catalog._by_picture, lambda where: 0.45 if where == "/there.arw" else None
+        try:
+            kept = catalog.Catalog(path)
+        finally:
+            catalog._by_picture = asked
+        edits = {key: json.loads(stored) for key, stored in kept.db.execute("SELECT key, edit FROM edits")}
+        assert edits == {"c1:aa:1": {"contrast": 30.0, "exposure": 0.45, **THEN}, "c1:bb:1": {**THEN, "lensColor": False, "exposure": 0.0},
+                         "c1:cc:1": {}, "c1:dd:1": {"contrast": 30.0}}, edits
+        assert [p["edit"] for p in kept.checkpoints("c1:aa:1")] == [{"exposure": 0.45, **THEN}], "a checkpoint at rest then is written out too"
+        history = edit.History(kept.load("c1:aa:1", Path("/there.arw")), kept.steps("c1:aa:1"))
+        assert history.at == 1 and history.states[0] == {"exposure": 0.45, **THEN}, "undo carries on, to the photo as it was"
+        assert kept.db.execute("PRAGMA user_version").fetchone()[0] == catalog.VERSION and path.with_name("catalog.db.v5").exists()
+        kept.close()
+    # And one of version 6, the hour the lens corrections were off at rest and the rest as in
+    # version 5: Exposure and the curve are written out, the corrections are not (they were
+    # off at rest then too, and edits from before had them written out already).
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "catalog.db"
+        catalog.Catalog(path).close()
+        old = sqlite3.connect(path)
+        with old:
+            for key, where, stored in (("c1:aa:1", "/there.arw", '{"contrast": 30.0}'), ("c1:bb:1", "/there.arw", '{"lensColor": true, "exposure": 1.0}'),
+                                       ("c1:cc:1", "/done.jpg", json.dumps({**ON, "contrast": 30.0}))):
+                old.execute("INSERT INTO edits VALUES (?, ?, ?, ?, 1, '[]')", (key, key.split(":")[1], where, stored))
+            # (Version 6's round wrote the corrections into the edit, not into its undo steps.)
+            old.execute("INSERT INTO steps VALUES ('c1:cc:1', ?, 1)", (json.dumps([{}, {"contrast": 30.0}]),))
+            old.execute("PRAGMA user_version=6")
+        old.close()
+        asked, catalog._by_picture = catalog._by_picture, lambda where: 0.45 if where.endswith(".arw") else None
+        try:
+            kept = catalog.Catalog(path)
+        finally:
+            catalog._by_picture = asked
+        edits = {key: json.loads(stored) for key, stored in kept.db.execute("SELECT key, edit FROM edits")}
+        assert edits == {"c1:aa:1": {"contrast": 30.0, "exposure": 0.45, "curve": edit.STRAIGHT},
+                         "c1:bb:1": {"lensColor": True, "exposure": 1.0, "curve": edit.STRAIGHT}, "c1:cc:1": {**ON, "contrast": 30.0}}, edits
+        history = edit.History(kept.load("c1:cc:1", Path("/done.jpg")), kept.steps("c1:cc:1"))
+        assert history.at == 1 and history.states[0] == ON, "its undo steps end where its edit stands again"
         kept.close()
     assert catalog._held_back(None) is None and catalog._held_back("/no/such/file.arw") is None and catalog._held_back("/a/picture.jpg") is None
     assert catalog._start_4(0.7, [0.01, 0.02]) == 0.7 and catalog._start_4(0.0, [0.01, 0.02]) == 0, "version 4: never more than the camera was set under"
@@ -1835,8 +1880,7 @@ def check_session_tools() -> None:
     session.setBypass("detail")
     assert session.uniforms["sharpen"] == 0 and session.uniforms["denoise"] == 0 and session.uniforms["denoiseColor"] == 0
     session.setBypass("")
-    assert not session.comparable["lens"], "a file without figures of its lens: nothing to compare"
-    assert edit.uniforms({k: v for k, v in edit.IDLE.items() if k.startswith("lens")}, {**edit.FINISHED, "lens": {"distortion": [0] * 15 + [900]}}, False, shape=1.5)["lensOn"] == 0
+    assert not session.comparable["lens"], "nothing of the Lens card is on: nothing to compare"
     steps = session.history.at
     session.resetTool("tone")
     assert session.history.edit == {"saturation": 120.0} and session.history.at == steps + 1
@@ -2241,13 +2285,14 @@ def check_local() -> None:
     kept = edit.valid_masks([{**mask, "edit": {"exposure": 0.5, "contrast": 0, "saturation": 500, "nonsense": 3}}])[0]
     assert kept["edit"] == {"exposure": 0.5, "saturation": 100.0}, kept
     assert "edit" not in edit.valid_masks([{**mask, "edit": {"exposure": 0}}])[0], "an empty edit is not kept"
-    camera = {"shot": (5200.0, 10.0), "light": None}
+    camera = {"shot": (5200.0, 10.0), "match": [[0.0, 0.0], [0.4, 0.5], [1.0, 1.0]]}
     whole = {"exposure": 1.0, "saturation": 150.0, "contrast": 10.0}
     inside = edit.merged(whole, {"exposure": 0.5, "saturation": 100.0, "temperature": -700.0, "tint": 5.0}, camera)
     assert inside == {"exposure": 1.5, "saturation": 200.0, "contrast": 10.0, "temperature": 4500.0, "tint": 15.0}, inside
-    # (Where the whole image says nothing of the exposure, the photo's start is added to.)
-    start = edit.exposure_of(edit.DEFAULTS, camera)
-    assert edit.merged({}, {"exposure": -1.0}, camera)["exposure"] == start - 1.0
+    # (Where the whole image says nothing of the exposure, its 0 is added to; and inside, the
+    # photo's own curve holds as it does outside.)
+    assert edit.merged({}, {"exposure": -1.0}, camera)["exposure"] == -1.0
+    assert edit.uniforms(edit.merged({}, {"exposure": -1.0}, camera), {**CAMERA, **camera}, True)["curveY"][1] == 0.5
     # A curve or the EQ of a mask's own holds in place of the whole image's; without one, that holds.
     bent = [[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
     own = edit.valid_masks([{**mask, "edit": {"curve": bent, "eq": [{"hue": 120, "gain": 150, "width": 40}]}}])[0]["edit"]
@@ -2572,7 +2617,7 @@ def check_catalog_before_library() -> None:
         old.close()
         for _ in range(2):
             kept = catalog.Catalog(path)
-            assert kept.load("c1:aa:1", Path("/a.arw")) == {"exposure": 1.5} and kept.photos() == []
+            assert kept.load("c1:aa:1", Path("/a.arw")) == {"exposure": 1.5, **THEN} and kept.photos() == []
             kept.close()
         copy = sqlite3.connect(path.with_name("catalog.db.v1"))
         assert copy.execute("PRAGMA user_version").fetchone()[0] == 1, "as it was before"
@@ -2694,7 +2739,7 @@ def check_denoise() -> None:
     reduction on it. (The net itself runs on a real file: PHOTONE_SAMPLE.)"""
     cam_xyz = [[0.746, -0.2365, -0.0588], [-0.5687, 1.3442, 0.2474], [-0.0624, 0.1156, 0.6584]]
     about = {"wb": [2.4, 1.0, 1.6], "cam_xyz": cam_xyz, "a": 2.0, "b": 30.0, "room": 15868.0,
-             "light": [0.05, 0.4], "lens": {"distortion": [1, 2, 3]}, "turned": 8, "preview": None}
+             "match": [[0.0, 0.0], [0.3, 0.36], [1.0, 1.0]], "lens": {"distortion": [1, 2, 3]}, "turned": 8, "preview": None}
     rng = np.random.default_rng(3)
     # (Grays with a little color: a color no camera records has no place in the net's terms.)
     noisy = (rng.random((30, 44, 1)) * 30000 + 2000 + rng.random((30, 44, 3)) * 1500).astype(np.uint16)
@@ -2757,7 +2802,7 @@ def check_denoise() -> None:
         info, pixels = decode.load(out, half=False)
         # (Lying on its side in the file, as the sensor had it: upright again when read.)
         assert (info["width"], info["height"], info["full"]) == (44, 30, [44, 30]), info
-        assert info["raw"] and info["denoised"] and info["light"] == about["light"], info
+        assert info["raw"] and info["denoised"] and info["match"] == about["match"], info
         assert info["camera"] == {"wb": about["wb"], "cam_xyz": cam_xyz, "lens": about["lens"], "denoised": True}
         seen = np.frombuffer(pixels.buf, np.float16).reshape(30, 44, 4)
         want = np.clip(held.mixed(whole, 0.7, 0.4) @ held.from_cam.T, 0, 1)
@@ -2850,7 +2895,7 @@ def check_denoise_sample(path: Path) -> None:
         out = denoise.save(held, copy)
         was, _ = decode.load(copy, half=False)
         now, pixels = decode.load(out, half=False)
-        assert (now["width"], now["height"], now["light"]) == (was["width"], was["height"], was["light"])
+        assert (now["width"], now["height"], now["match"]) == (was["width"], was["height"], was["match"]), "the original's curve goes with it"
         seen = np.frombuffer(pixels.buf, np.float16).reshape(now["height"], now["width"], 4)[::4, ::4, :3].astype(np.float32)
         before = held.noisy[::4, ::4] / 65535
         rough = lambda p: float(np.abs(p[:, 2:] - 2 * p[:, 1:-1] + p[:, :-2]).mean())  # noqa: E731
@@ -2872,11 +2917,16 @@ def check_sample(path: Path) -> None:
     full, _ = decode.load(path, half=False)
     assert full["width"] > meta["width"] * 1.9, "full size is twice the half size"
     assert meta["full"] == [full["width"], full["height"]] == full["full"], "half knows the real size"
-    assert meta["light"] == full["light"] and 0 < meta["light"][0] < meta["light"][1] <= 1, \
-        f"how light the sensor's picture is, the same whichever size is developed: {meta['light']}, {full['light']}"
-    bias, (middle, top) = library.describe(path)["bias"], meta["light"]
+    assert meta["match"] == full["match"] and edit.valid_curve(meta["match"]) == meta["match"], \
+        f"the photo's own curve, the same whichever size is developed: {meta['match']}, {full['match']}"
+    import rawpy
+
+    with rawpy.imread(str(path)) as raw:
+        middle, top = decode.light_of(raw)
+    bias = library.describe(path)["bias"]
     was = round(max(0.0, min(-bias, math.log2(0.5 / top), math.log2(0.06 / middle), 3.0)), 2)
     assert catalog._held_back(str(path)) == was, f"where this photo started under version 4: {catalog._held_back(str(path))}, not {was}"
+    assert catalog._by_picture(str(path)) == catalog._start_5([middle, top]), "and under version 5"
     assert (meta["size"], full["size"]) == ("half", "full")
     print(f"  sample {path.name}: {meta['width']}×{meta['height']} half, "
           f"{full['width']}×{full['height']} full")

@@ -529,7 +529,7 @@ class Exporter(QObject):
             return self._written(found, "", run)
         meta, self.picture = found
         camera = meta["camera"] or edit.FINISHED
-        camera = {**camera, "shot": edit.as_shot(camera), "light": meta.get("light")}
+        camera = {**camera, "shot": edit.as_shot(camera), "match": meta.get("match")}
         stored = self._edit_of(self._photo)
         frame = edit.frame(stored, meta["width"], meta["height"])  # its turns, angle and crop
         shape = meta["width"] / max(1, meta["height"])

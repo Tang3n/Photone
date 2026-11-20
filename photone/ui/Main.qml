@@ -1268,12 +1268,9 @@ Rectangle {
                     onFlipped: session.setPanel("clipping", !session.panels.clipping)
                 }
                 Item { width: 1; height: 8 }
-                // Its zero is the photo as shot, and a double click puts it there. Where a
-                // photo starts (lighter than shot if it has room: session.shot) is only the
-                // value it has when first opened, which Reset all and the card's Reset bring
-                // back. (The start was the slider's rest and its tick; the owner: it "should
-                // NOT set the actual zero point of the slider, nor should it make the bar
-                // reset to it. It simply needs to be the initial value".)
+                // Its zero is the photo as shot, where every photo starts, and a double click
+                // puts it there. (A raw file is shown as its camera's own picture by the tone
+                // curve at the card's foot, which starts as the photo's own: edit.curve_of.)
                 EditSlider { key: "exposure"; name: "Exposure"; unit: "EV"; from: -5; to: 5; step: 0.01; digits: 2; rest: 0 }
                 EditSlider { key: "contrast"; name: "Contrast"; from: -100; to: 100; step: 1; digits: 0 }
                 EditSlider { key: "brightness"; name: "Brightness"; from: -100; to: 100; step: 1; digits: 0 }

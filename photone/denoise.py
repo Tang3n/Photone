@@ -114,7 +114,8 @@ def known(shape: tuple, iso: float) -> tuple[float, float] | None:
 def develop(path: Path) -> tuple[np.ndarray, dict]:
     """((h, w, 3) uint16 scene-linear Rec.2020, the very picture Photone shows at full size;
     what is known of the photo: the camera's `wb` and `cam_xyz`, the noise's `a` and `b` over
-    the range `room`, how it is `turned`, its `light`, `lens` figures, `header` and `preview`).
+    the range `room`, how it is `turned`, the tone curve it starts with (`match`), its `lens`
+    figures, `header` and `preview`).
     A ValueError says why a file cannot be denoised."""
     import rawpy
 
@@ -133,7 +134,7 @@ def develop(path: Path) -> tuple[np.ndarray, dict]:
             mosaic = raw.raw_image_visible
             a, b = known(mosaic.shape, float(raw.other.iso_speed)) or of_mosaic(mosaic - black)
             about = {**camera, "a": a, "b": b, "room": float(raw.white_level - black),
-                     "light": decode.light_of(raw), "lens": lens.figures(path)}
+                     "match": decode.match_of(raw, camera), "lens": lens.figures(path)}
             jpeg = _carried(raw)
             rgb = raw.postprocess(half_size=False, gamma=(1, 1), no_auto_bright=True,
                                   output_bps=16, use_camera_wb=True,
@@ -378,7 +379,7 @@ def save(held: Denoised, path: Path, color: float = 1.0, grain: float = 1.0) -> 
         # the same after a rename or a move), so that the two can be shown as a pair.)
         "neural": {"model": MODEL.stem, "color": color, "grain": grain, "from": path.name,
                    "of": identify(path)},
-        "kept": {"matrix": matrix, "light": about["light"],
+        "kept": {"matrix": matrix, "match": about["match"],
                  "camera": {"wb": about["wb"], "cam_xyz": about["cam_xyz"],
                             "lens": about["lens"], "denoised": True}}})
     return out

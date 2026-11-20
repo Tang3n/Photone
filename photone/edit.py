@@ -15,8 +15,8 @@ import numpy as np
 from photone import lens, lut
 
 # None for the white balance means "as the camera shot it", which differs per photo; and None
-# for the exposure "where this photo starts": as shot, or lighter where the picture has room
-# (`exposure_of`).
+# for the tone curve "the photo's own": for a raw file, the one that shows it as the camera's
+# own picture shows it (`curve_of`).
 STRAIGHT = [[0.0, 0.0], [1.0, 1.0]]  # the tone curve that changes nothing
 # Black and white. A film look is a set of points of the B&W EQ and nothing else: around
 # `hue` (degrees on the wheel: 30 red, 60 orange, 105 yellow, 145 green, 200 cyan, 262 blue,
@@ -50,8 +50,8 @@ CHARACTERS = {"fine": {"grain": 20.0, "grainSize": 0.6, "grainRough": 30.0},
               "pushed": {"grain": 75.0, "grainSize": 2.3, "grainRough": 85.0}}
 GRAINS = 4000.0  # grains along the picture's longer side at size 1: 1.75 pixels each at 33 MP
 DEFAULTS = {"profile": "standard", "temperature": None, "tint": None,
-            "exposure": None, "contrast": 0.0, "brightness": 0.0, "highlights": 0.0,
-            "midtones": 0.0, "shadows": 0.0, "whites": 0.0, "blacks": 0.0, "curve": STRAIGHT,
+            "exposure": 0.0, "contrast": 0.0, "brightness": 0.0, "highlights": 0.0,
+            "midtones": 0.0, "shadows": 0.0, "whites": 0.0, "blacks": 0.0, "curve": None,
             "pins": [],
             "saturation": 100.0, "vibrance": 0.0, "chroma": STRAIGHT, "eq": [],
             "mono": False, "bw": FILMS["panchromatic"],
@@ -60,9 +60,10 @@ DEFAULTS = {"profile": "standard", "temperature": None, "tint": None,
             # as defaults would be good". At 0 a setting is switched off, and kept as that.)
             "sharpen": 20.0, "sharpenRadius": 1.0, "sharpenMask": 0.0,
             "denoise": 10.0, "denoiseColor": 10.0,
-            # (On until switched off, where the file has the camera's figures: the owner's
-            # choice, "i think all should be switched on by default".)
-            "lensDistortion": True, "lensColor": True, "lensVignetting": True,
+            # (Off until switched on. They were on at first, the owner's choice then: "i think
+            # all should be switched on by default"; and then, 2026-11-20: "make these off
+            # by default". Edits kept from before say that they had them on: catalog.LENS_ON.)
+            "lensDistortion": False, "lensColor": False, "lensVignetting": False,
             "defringe": 0.0,
             "grain": 0.0, "grainSize": 1.0, "grainRough": 50.0, "grainColor": 0.0,
             "grainCurve": RESPONSES["print"],
@@ -93,10 +94,12 @@ TOOLS = {"tone": ("profile", "exposure", "contrast", "brightness", "highlights",
          "lens": ("lensDistortion", "lensColor", "lensVignetting", "defringe"),
          "mono": ("bw",),  # (the look; black and white itself is a switch, no tool's setting)
          "crop": FRAME}
-# The settings that do something at rest (lens corrections are on, a photo is sharpened a
-# little), and what they are when they do nothing: what a card's A/B shows the photo with.
-IDLE = {"lensDistortion": False, "lensColor": False, "lensVignetting": False,
-        "sharpen": 0.0, "denoise": 0.0, "denoiseColor": 0.0}
+# The settings that do something at rest (a photo is sharpened a little), and what they are
+# when they do nothing: what a card's A/B shows the photo with.
+# (The tone curve at rest is the photo's own, `curve_of`: held, the Exposure card's A/B shows
+# the photo with it straight, as shot. It showed the exposure a photo started lighter at,
+# which was the slider's start; the owner: "its a confusing design".)
+IDLE = {"sharpen": 0.0, "denoise": 0.0, "denoiseColor": 0.0, "curve": STRAIGHT}
 POINTS = 16     # of a tone curve: what the shader's three matrices hold
 GAP = 0.01      # the least two neighboring curve points are apart, left to right
 PINS = 12       # color pins a photo can have: what the shader's nine matrices hold
@@ -186,12 +189,12 @@ FINISHED = {"wb": (1 / (BRADFORD @ SRGB_TO_XYZ.sum(axis=1))).tolist(),
 def valid(key: str, value):
     """The value as the edit keeps it, or ValueError. Everything that enters an edit passes
     here: what the interface sends and what a catalog file holds."""
+    if value is None and key in DEFAULTS and DEFAULTS[key] is None:
+        return None  # (the photo's own: the white balance as shot, its tone curve)
     if key in SHAPES:  # a setting that is more than one number
         return SHAPES[key](value)
     if key not in RANGES:
         raise ValueError(f"no such setting: {key!r}")
-    if value is None and DEFAULTS[key] is None:
-        return None
     if not _number(value):
         raise ValueError(f"{key} must be a number")
     low, high = RANGES[key]
@@ -563,11 +566,11 @@ def _local(given) -> dict:
 def merged(edit: dict, local: dict, camera: dict | None) -> dict:
     """The edit of the picture inside a mask: the whole image's with the mask's amounts
     added, each kept within what the setting can be, and as `over` the mask's own curves and
-    EQ, which come on top. Where the whole image's says nothing
-    (the exposure a photo starts with, the white balance as shot), that is what is added to."""
+    EQ, which come on top. Where the whole image's says nothing (the white balance as shot),
+    that is what is added to."""
     full, out = {**DEFAULTS, **edit}, dict(edit)
     shot = (camera.get("shot") or as_shot(camera)) if camera else (6500.0, 0.0)
-    rest = {"exposure": exposure_of(full, camera), "temperature": shot[0], "tint": shot[1]}
+    rest = {"temperature": shot[0], "tint": shot[1]}
     for key, amount in local.items():
         if key in LOCAL_WHOLE:  # on top of the whole image's, which stays (over_uniforms)
             out["over"] = {**out.get("over", {}), key: amount}
@@ -689,58 +692,6 @@ def light(cam_xyz, neutral) -> tuple[float, float]:
     along = (ahead - here) / np.linalg.norm(ahead - here)
     tint = float(np.dot(target - here, [along[1], -along[0]])) * TINT
     return kelvin, float(round(tint))
-
-
-# Where a photo's exposure starts (`exposure_of`): raised until the brightest twentieth of the
-# picture is at this share of the sensor's white (a gray there is shown at level 238 of 255),
-# or until the picture's middle is as light as this (the owner's photos shot as metered have
-# theirs at 0.047), and never by more stops than MOST: a picture darker than that is a night,
-# and is left one.
-TOP_AT, MIDDLE_AT, MOST = 0.5, 0.06, 2.0
-
-
-def exposure_of(full: dict, camera: dict | None) -> float:
-    """The exposure in stops: what the edit says; or, where it says nothing, where the photo
-    starts: as much lighter than it was shot as the picture has room for (`light`:
-    decode.light_of's two figures), never lower. A photo shot under to keep its highlights
-    starts lighter; one that is light already, or has something bright in a twentieth of it,
-    starts as shot. By the picture alone, whatever the camera was set to.
-
-    How it came to this, 2026-11-17. First the camera's exposure compensation was taken back
-    whole (the owner's wish: "so that its not so dark if i had -2EV on the camera"), which
-    was wrong: "that exposure compensation made the photos very overexposed". A compensation
-    is the photographer's correction of the meter as often as a habit; of 120 of his photos it
-    left 11 % with more than 2 % of the picture cut off at white, where as shot 2 % are. Then
-    the compensation was taken back only as far as the picture had room; held back by the
-    brightest hundredth, a window in the frame kept a dark room dark ("i cant find any
-    photo" that starts lighter), so it is the brightest twentieth: at most 4 % of any picture
-    newly near white. Then the owner: "maybe ALL the photos could have their default EV be
-    set based on the same rule, independent of metadata?" So the compensation is no longer
-    asked. Of 300 photos 84 % start lighter, by 1.3 stops on average before the limit of two
-    stops, which is there for the 6 % (night scenes, frames nearly black) that would
-    otherwise be raised by three or more. Without the two figures (a sensor that is no Bayer
-    mosaic, a finished picture) a photo starts as shot.
-
-    ponytail: an edit that names no Exposure follows this rule, so every change of the rule
-    needs the catalog to write out what such edits had (`Catalog._keep_exposure`, three times
-    so far, each needing the old rule kept). The upgrade is to keep the start with the edit
-    when it is first made."""
-    if full["exposure"] is not None:
-        return full["exposure"]
-    light = (camera or {}).get("light")
-    if not light:
-        return 0.0
-    room = min(math.log2(TOP_AT / max(light[1], 1e-4)), math.log2(MIDDLE_AT / max(light[0], 1e-4)))
-    return round(max(0.0, min(room, MOST)), 2)
-
-
-def sensed(shown, profile: str = "standard"):
-    """The light a sensor recorded (a share of its white) where the profile's curve shows
-    `shown` (a share of the display's white; a number or an array): the curve read backwards.
-    For reading a camera's own finished picture as if it were the sensor's."""
-    c, s, k = curve(profile)
-    shown = np.clip(shown, 0.0, 1.0)
-    return (s * shown / (k - shown)) ** (1 / c)
 
 
 def as_shot(camera: dict) -> tuple[float, float]:
@@ -1332,7 +1283,7 @@ def uniforms(edit: dict, camera: dict | None, raw: bool, white: float = 1.0,  # 
         full.update(denoise=0.0, denoiseColor=0.0)
     to_cam, from_cam, wb = balance(full, camera)
     c, s, k = curve(full["profile"]) if raw else (0.0, 1.0, 1.0)  # 0: no curve
-    out = {"gain": 2.0 ** exposure_of(full, camera), "wbGain": wb,
+    out = {"gain": 2.0 ** full["exposure"], "wbGain": wb,
            "toCam": to_cam.tolist(), "fromCam": from_cam.tolist(),
            "mid": MID if raw else MID_FINISHED,
            # Contrast: stops from mid gray are stretched by this much round mid gray (-100
@@ -1353,7 +1304,8 @@ def uniforms(edit: dict, camera: dict | None, raw: bool, white: float = 1.0,  # 
            "blacks": -math.copysign(0.03 * (full["blacks"] / 100) ** 2, full["blacks"]),
            "curveC": c, "curveS": s, "curveK": k,
            "hdrLift": max(0.0, white - 1) if raw else 0.0,
-           **curve_uniforms(full["curve"]), **pins_uniforms([] if full["mono"] else full["pins"]),
+           **curve_uniforms(curve_of(full, camera)),
+           **pins_uniforms([] if full["mono"] else full["pins"]),
            **look_uniforms(full), **grain_uniforms(full, shape),
            **luts_uniforms(full["luts"]), **detail_uniforms(full, shape, wide),
            # Lens corrections, from the camera's own figures where the file had them.

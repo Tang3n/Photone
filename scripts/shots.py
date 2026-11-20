@@ -2138,7 +2138,7 @@ def audit_test_chart() -> list[str]:
     # camera's figures nor Defringe.
     session = ui.Session([Path("test chart.arw")], load=lensed)
     view, root = opened(session, "")
-    session.setEdits({"defringe": 80.0})
+    session.setEdits({"defringe": 80.0, **catalog.LENS_ON})
     session.commitEdit()
     faults.expect(session.uniforms["lensOn"] == 1 and session.uniforms["defringe"] > 0, "the lens corrections are not on for the photo itself")
     session.setPanel("chart", True)
@@ -4444,11 +4444,11 @@ def audit_lens() -> list[str]:
             low, high = (at, high) if read < x else (low, at)
         return (low + high) / 2
 
-    # All three are on for a photo that says nothing else (the owner's choice); each is then
-    # tried alone, from all off.
-    faults.expect(session.lensHas == {"distortion": True, "color": True, "vignetting": True} and session.uniforms["lensOn"] == 1
-                  and all(find(root, f"lens:{name}").property("on") for name in ("distortion", "color", "vignetting")),
-                  f"a file with figures: {session.lensHas}; its corrections are not on from the start")
+    # All three are off for a photo that says nothing else (the owner, 2026-11-20: "make
+    # these off by default"); each is then tried alone.
+    faults.expect(session.lensHas == {"distortion": True, "color": True, "vignetting": True} and session.uniforms["lensOn"] == 0
+                  and not any(find(root, f"lens:{name}").property("on") for name in ("distortion", "color", "vignetting")),
+                  f"a file with figures: {session.lensHas}; its corrections are not off from the start")
     off = {"lensDistortion": False, "lensColor": False, "lensVignetting": False}
     session.setEdits(off)
     session.commitEdit()
@@ -4461,7 +4461,7 @@ def audit_lens() -> list[str]:
     click(view, find(root, "lens:vignetting"))
     lit = seen()
     high, wide = lit.shape[:2]
-    faults.expect(session.history.edit == {"lensDistortion": False, "lensColor": False} and np.abs(lit[high // 2 - 4:high // 2 + 4, wide // 2 - 4:wide // 2 + 4] - plain_[high // 2 - 4:high // 2 + 4, wide // 2 - 4:wide // 2 + 4]).max() <= 1,
+    faults.expect(session.history.edit == {"lensVignetting": True} and np.abs(lit[high // 2 - 4:high // 2 + 4, wide // 2 - 4:wide // 2 + 4] - plain_[high // 2 - 4:high // 2 + 4, wide // 2 - 4:wide // 2 + 4]).max() <= 1,
                   f"Vignetting: {session.history.edit}, or the picture's middle changed")
     corner = lambda shot: shot[int(0.7 * high):int(0.76 * high), int(0.03 * wide):int(0.06 * wide)].mean()  # noqa: E731
     faults.expect(corner(lit) > corner(plain_) * 1.1, f"Vignetting: a corner went from {corner(plain_):.1f} to {corner(lit):.1f} levels")
@@ -4494,9 +4494,11 @@ def audit_lens() -> list[str]:
     faults.expect(abs(mid - edges[-1]) < 0.3 and abs(red - mid) < 0.5 and abs(blue - mid) < 0.5,
                   f"Chromatic aberration: corrected, the last step's red is {red - mid:.2f} px and its blue {blue - mid:.2f} px from its green, which moved {mid - edges[-1]:.2f}")
     faults.expect(steep(fringed) > 0.95 * steep(plain_), f"Chromatic aberration: corrected, the last step rises by {steep(fringed):.1f} levels a pixel at most, uncorrected by {steep(plain_):.1f}: softer")
-    # The file is the picture on screen, with all three.
+    # Reset all switches them off again; the file is the picture on screen, with all three.
     session.resetAll()
-    faults.expect(session.history.edit == {} and session.uniforms["lensOn"] == 1, "Reset all does not bring the three corrections back on")
+    faults.expect(session.history.edit == {} and session.uniforms["lensOn"] == 0, "Reset all does not switch the three corrections off")
+    session.setEdits(dict(catalog.LENS_ON))
+    session.commitEdit()
     # Seen from close, the photo's pixels are squares also with the corrections (and the
     # sharpening and noise reduction a photo starts with) on: along a row, four pixels of
     # the screen to one of the photo, the color changes every fourth pixel and not between.
@@ -4903,42 +4905,50 @@ def audit_balance() -> list[str]:
 
 
 def audit_start() -> list[str]:
-    """A photo whose picture has room for 1.58 stops starts that much lighter: Exposure rests
-    there, a double click on the slider brings it back there and not to 0, and the export is
-    the picture on screen."""
+    """A raw photo starts at Exposure 0, with its own tone curve (edit.curve_of): the curve
+    editor draws it, a double click on the Exposure slider keeps 0, Reset all brings the
+    photo's own curve back, the Exposure card's A/B shows the curve straight, and the export
+    is the picture on screen."""
     out = Path(tempfile.mkdtemp(prefix="photone-dark-", dir=SHELF.name))
     (out / "dark.arw").write_bytes(fixtures.exif("SONY", "ILCE-7M4", "2026:07:04 13:35:44", 1, -1.0))
-    def roomy(path: Path, half: bool):  # the chart, as a picture with room for 1.58 stops
+    own = [[0.0, 0.0], [0.2, 0.34], [0.6, 0.72], [1.0, 1.0]]
+    def matched(path: Path, half: bool):  # the chart, as a raw file whose camera showed it lighter
         meta, pixels = chart(path, half)
-        return {**meta, "light": [0.02, 0.1]}, pixels
+        return {**meta, "match": own}, pixels
 
-    session = ui.Session([out / "dark.arw"], load=roomy)
+    session = ui.Session([out / "dark.arw"], load=matched)
     view, root = opened(session, "tone")
     session.exporter.side = 256
     faults = Faults()
-    faults.expect(session.edit["exposure"] == 1.58 and abs(session.uniforms["gain"] - 2 ** 1.58) < 1e-9 and not session.history.edit,
-                  f"with room for 1.58 stops, the photo starts at {session.edit['exposure']} EV")
+    faults.expect(session.edit["exposure"] == 0 and session.uniforms["gain"] == 1 and not session.history.edit,
+                  f"the photo starts at {session.edit['exposure']} EV, not as shot")
+    faults.expect(session.curve == own and session.uniforms["curveOn"] == 1, f"the photo's own curve is not on: {session.curve}")
     slider = find(root, "slider:exposure")  # kept: its wrapper going would take the track's
     at = box(slider.findChild(QObject, "thumb")).center().toPoint()  # (by its thumb: from where it is)
     drag(view, at, QPoint(60, 0))
-    faults.expect(session.history.edit.get("exposure", 1.58) > 1.58, f"a drag to the right left Exposure at {session.edit['exposure']}")
-    # Its zero is the photo as shot: a double click puts it there, and the tick is there.
-    # Where the photo starts is only its first value, which Reset all brings back.
-    double_click(view, at)
-    faults.expect(session.edit["exposure"] == 0 and session.history.edit.get("exposure") == 0,
+    faults.expect(session.history.edit.get("exposure", 0) > 0, f"a drag to the right left Exposure at {session.edit['exposure']}")
+    double_click(view, box(slider.findChild(QObject, "thumb")).center().toPoint())
+    faults.expect(session.edit["exposure"] == 0 and "exposure" not in session.history.edit,
                   f"a double click left Exposure at {session.edit['exposure']}, not at 0")
     tick, thumb = (box(slider.findChild(QObject, n)).center().x() for n in ("tick", "thumb"))
     faults.expect(abs(tick - thumb) < 1.5, f"at 0, the slider's tick is {abs(tick - thumb):.0f} px from its thumb")
+    session.setEdit("curve", edit.STRAIGHT)
     session.resetAll()
     settle()
-    faults.expect(session.edit["exposure"] == 1.58 and not session.history.edit,
-                  f"Reset all left Exposure at {session.edit['exposure']}, not where the photo starts (+1.58)")
+    faults.expect(session.curve == own and not session.history.edit, f"Reset all left the curve at {session.curve}, not the photo's own")
+    lighter = shown_at_full_size(view, root)
+    session.setBypass("tone")
+    settle()
+    straight = shown_at_full_size(view, root)
+    session.setBypass("")
+    settle()
+    faults.expect(lighter.mean() > straight.mean() + 5, f"held, the Exposure card's A/B does not show the curve straight ({lighter.mean():.0f} and {straight.mean():.0f})")
     screen = shown_at_full_size(view, root)
     session.exporter.start([str(out / "dark.arw")], {"kind": "png8", "quality": 92, "longest": 0, "folder": str(out)})
     carry_out(view, session)
     file = export.bytes_of(QImage(str(out / "dark.png"))) if (out / "dark.png").stat().st_size else np.zeros((1, 1, 3))
     off = np.abs(file.astype(int) - screen).max() if file.shape == screen.shape else 999
-    faults.expect(off <= 1, f"the export of a photo that starts lighter is not the picture on screen: up to {off} levels off")
+    faults.expect(off <= 1, f"the export of a photo with its own curve is not the picture on screen: up to {off} levels off")
     ui.close_view(view)
     return faults
 

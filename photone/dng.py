@@ -339,9 +339,11 @@ def _laid(file, tags: dict) -> tuple[int, int, int, list]:
 
 def read(path: Path, half: bool) -> tuple[dict, np.ndarray] | None:
     """A file of ours as Photone shows any raw file: (what it kept of the original: `camera`
-    ({"wb", "cam_xyz", "lens"}), `light` (decode.light_of's figures) and `full` (the upright
-    picture's (wide, high)); the picture upright, (h, w, 4) half floats of linear Rec.2020
-    with the camera's white balance on, between 0 and 1 as LibRaw hands a raw file over).
+    ({"wb", "cam_xyz", "lens"}), the tone curve it starts with, `match` (decode.match_of;
+    None in a file written before 2026-11-20, which has the original's `light` in its place:
+    decode.light_of's figures) and `full` (the upright picture's (wide, high)); the picture
+    upright, (h, w, 4) half floats of linear Rec.2020 with the camera's white balance on,
+    between 0 and 1 as LibRaw hands a raw file over).
     `half`: every second pixel each way, for the quick first picture. None for a file that is
     not ours; a ValueError where one of ours is cut short or otherwise not as written."""
     with path.open("rb") as file:
@@ -372,4 +374,5 @@ def read(path: Path, half: bool) -> tuple[dict, np.ndarray] | None:
     if turned in TURNS:
         out = np.ascontiguousarray(np.rot90(out, TURNS[turned]))
     full = (wide, high) if turned not in (6, 8) else (high, wide)
-    return {"camera": found[1].get("camera"), "light": found[1].get("light"), "full": full}, out
+    return {"camera": found[1].get("camera"), "match": found[1].get("match"),
+            "light": found[1].get("light"), "full": full}, out

@@ -20,6 +20,7 @@ import os
 import shutil
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from photone import edit
@@ -27,9 +28,14 @@ from photone import edit
 # 2: the library's tables (folders, photos). 3: an edit that names no Exposure takes the
 # camera's exposure compensation back; edits kept before, where none meant 0, say so now.
 # 4: it takes it back only as far as the picture has room; 5: it starts by the picture alone
-# (edit.exposure_of). Each time, edits kept under the version before that named no Exposure
-# say what they had (`Catalog._keep_exposure`).
-VERSION = 5
+# (`_start_5`). Each time, edits kept under the version before that named no Exposure say
+# what they had (`Catalog._keep`). 6 (2026-11-20, for an hour): the lens corrections are off
+# until switched on; edits kept before, which had them on unless they said otherwise, say so
+# now. 7: Exposure starts at 0 and the tone curve at the raw file's own (edit.curve_of);
+# edits of raw files kept before, which had the curve straight and Exposure where version 5
+# started it (so did 6), say so now.
+VERSION = 7
+LENS_ON = {"lensDistortion": True, "lensColor": True, "lensVignetting": True}
 PIECE = 64 * 1024
 # What a photo can be marked, and how far: rejected to picked, no stars to five, no label to
 # the fifth color.
@@ -91,6 +97,36 @@ def _held_back(path: str | None) -> float | None:
         with rawpy.imread(path) as raw:
             return _start_4(whole, decode.light_of(raw))
     except (rawpy.LibRawError, OSError):
+        return None
+
+
+def _start_5(light: list[float] | None) -> float:
+    """The rule of version 5, kept for the edits made under it: lighter than shot as far as the
+    picture (decode.light_of's figures) had room, until its brightest twentieth was at half of
+    the sensor's white or its middle at 0.06 of it, by two stops at most."""
+    if not light:
+        return 0.0
+    room = min(math.log2(0.5 / max(light[1], 1e-4)), math.log2(0.06 / max(light[0], 1e-4)))
+    return round(max(0.0, min(room, 2.0)), 2)
+
+
+def _by_picture(path: str | None) -> float | None:
+    """Where Exposure started under version 5 for the photo at that path, or None if the file
+    is not there to ask: by the sensor's picture, or by what a file the neural denoiser wrote
+    kept of the original's."""
+    import rawpy
+
+    from photone import decode, dng
+
+    if not path or Path(path).suffix.lower() not in decode.RAW:
+        return None  # (a finished picture started at 0 then as it does now)
+    try:
+        ours = dng.read(Path(path), True) if dng.made_here(Path(path)) else None
+        if ours:
+            return _start_5(ours[0].get("light"))
+        with rawpy.imread(path) as raw:
+            return _start_5(decode.light_of(raw))
+    except (rawpy.LibRawError, OSError, ValueError):
         return None
 
 
@@ -174,36 +210,67 @@ class Catalog:
                 self.db.execute("CREATE INDEX IF NOT EXISTS same_content ON edits (content)")
                 self.db.executescript(LIBRARY)
                 if 0 < found < VERSION:  # (where Exposure started then: 0 before version 3)
-                    self._keep_exposure({3: _taken_back, 4: _held_back}.get(found, lambda at: 0.0))
+                    start = {3: _taken_back, 4: _held_back, 5: _by_picture, 6: _by_picture}
+                    self._keep(start.get(found, lambda at: 0.0), found)
                 self.db.execute(f"PRAGMA user_version={VERSION}")
         except (sqlite3.Error, OSError) as e:
             raise Unusable(f"the catalog cannot be opened ({e}); edits will not be saved") from e
 
-    def _keep_exposure(self, start) -> None:
-        """Edits and checkpoints name no Exposure while it is where a photo starts, and where
-        that is has changed three times: 0 before version 3; the camera's whole exposure
+    def _keep(self, start, found: int) -> None:
+        """Edits, checkpoints and kept undo steps name what is at rest, and where some settings
+        rest has changed. Exposure four times: 0 before version 3; the camera's whole exposure
         compensation taken back in version 3; as far as the picture had room for it in
-        version 4; by the picture alone since (edit.exposure_of). So that no photo looks other
-        than it was left, an edit kept under an older rule has its Exposure written out as
-        what it was then: `start(path)`, or nothing if that cannot be known any more. (A photo
-        with no edit at all is left so: it takes the new start like any untouched photo.)"""
-        rows = self.db.execute("SELECT key, path, edit, checkpoints FROM edits").fetchall()
-        for key, path, stored, points in rows:
-            was = start(path)
+        version 4; by the picture alone in versions 5 and 6; 0 again since. The lens
+        corrections once: on before version 6, off since. The tone curve once: straight
+        before version 7, the raw file's own since. So that no photo looks other than it was
+        left, an edit kept under an older rule has them written out as they were then: its
+        Exposure `start(path)` (or nothing where that cannot be known any more); for a raw
+        file, the straight curve and, before version 6, the corrections on (`LENS_ON`). A
+        photo with no edit at all is left so: it starts as any untouched photo does. (Version
+        6's own round wrote the corrections into edits and checkpoints of every kind of file
+        and not into the undo steps, which then no longer ended where their edit stood and
+        were dropped when the photo was opened: from 6, the steps of an edit get them too.)
 
-            def as_it_was(values, was=was) -> dict:
-                known = not isinstance(values, dict) or "exposure" in values or was is None
-                return values if known else {**values, "exposure": was}
+        (`start` reads the sensor's picture of each edited raw photo whose edit, checkpoints
+        or undo steps name no Exposure, a tenth of a second each, on eight threads: about two
+        seconds once for the owner's hundred edits.)"""
+        from photone import decode
 
+        steps = dict(self.db.execute("SELECT key, states FROM steps").fetchall())
+        found_rows = []
+        for key, path, stored, points in self.db.execute(
+                "SELECT key, path, edit, checkpoints FROM edits").fetchall():
             try:
-                values = json.loads(stored)
-                kept = json.dumps(as_it_was(values) if values else values)
-                marks = json.dumps([{**point, "edit": as_it_was(point.get("edit", {}))}
-                                    for point in json.loads(points)])
+                values, marks = json.loads(stored), json.loads(points)
+                states = json.loads(steps.get(key, "[]"))
+                some = [*([values] if values else []), *(m.get("edit", {}) for m in marks),
+                        *states]
             except (ValueError, TypeError, AttributeError):
                 continue  # not what was written there: `load` will not read it either
+            unnamed = any(isinstance(e, dict) and "exposure" not in e for e in some)
+            found_rows.append((key, path, values, marks, states, unnamed))
+        asked = sorted({row[1] for row in found_rows if row[5]}, key=str)
+        with ThreadPoolExecutor(8) as threads:
+            starts = dict(zip(asked, threads.map(start, asked), strict=True))
+        for key, path, values, marks, states, _ in found_rows:
+            raw = bool(path) and Path(path).suffix.lower() in decode.RAW
+            was = starts.get(path)
+            then = {**(LENS_ON if found < 6 else {}), "curve": edit.STRAIGHT} if raw else {}
+            undone = {**LENS_ON, **then} if found == 6 and values else then
+
+            def as_it_was(values, was=was, then=then) -> dict:
+                if not isinstance(values, dict):
+                    return values
+                known = "exposure" in values or was is None
+                return {**then, **values, **({} if known else {"exposure": was})}
+
             self.db.execute("UPDATE edits SET edit = ?, checkpoints = ? WHERE key = ?",
-                            (kept, marks, key))
+                            (json.dumps(as_it_was(values) if values else values),
+                             json.dumps([{**m, "edit": as_it_was(m.get("edit", {}))}
+                                         for m in marks]), key))
+            if key in steps:
+                self.db.execute("UPDATE steps SET states = ? WHERE key = ?",
+                                (json.dumps([as_it_was(one, then=undone) for one in states]), key))
 
     def load(self, key: str | None, photo: Path) -> dict:
         """The photo's edit; empty when it has none or what is stored cannot be read."""

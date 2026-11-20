@@ -24,7 +24,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 from PySide6.QtCore import (
     Property,
     QAbstractListModel,
@@ -376,44 +375,13 @@ def _preview(photo: Path):
     return image.transformed(QTransform().rotate(quarter)) if quarter else image
 
 
-def lifted(image: QImage, stops: float) -> QImage:
-    """A finished picture made lighter or darker by so many stops, as nearly as that can be
-    done to eight bits: in linear light, each channel by itself, what goes over white cut off."""
-    if abs(stops) < 0.05:
-        return image
-    level = np.arange(256) / 255
-    light = np.where(level <= 0.04045, level / 12.92, ((level + 0.055) / 1.055) ** 2.4)
-    light = np.minimum(1.0, light * 2.0 ** max(-5.0, min(5.0, stops)))
-    table = np.where(light <= 0.0031308, light * 12.92, 1.055 * light ** (1 / 2.4) - 0.055)
-    table = np.round(table * 255).astype(np.uint8)
-    image = image.convertToFormat(QImage.Format.Format_RGB888)
-    wide, high, line = image.width(), image.height(), image.bytesPerLine()
-    seen = np.frombuffer(image.constBits(), np.uint8, line * high).reshape(high, line)[:, :wide * 3]
-    out = np.ascontiguousarray(table[seen])
-    return QImage(out.data, wide, high, wide * 3, QImage.Format.Format_RGB888).copy()
-
-
-def light_in(image: QImage) -> list[float]:
-    """decode.light_of's two figures (the picture's median lightness, and the level only its
-    brightest twentieth is above, as shares of the sensor's white), read from a finished picture of
-    the photo: the preview a raw file carries, with the camera's curve taken off as nearly as
-    the Standard profile's read backwards does. Near enough for a thumbnail."""
-    image = image.convertToFormat(QImage.Format.Format_RGB888)
-    wide, high, line = image.width(), image.height(), image.bytesPerLine()
-    seen = np.frombuffer(image.constBits(), np.uint8, line * high).reshape(high, line)
-    coded = seen[:, :wide * 3].reshape(high, wide, 3) / 255
-    shown = np.where(coded <= 0.04045, coded / 12.92, ((coded + 0.055) / 1.055) ** 2.4)
-    light = edit.sensed(shown)
-    return [float(np.median(light @ np.array(decode.LUMA))),
-            float(np.percentile(light.max(axis=-1), decode.TOP))]
-
-
 def forget_starts(cache: Path, photos: list[dict]) -> None:
-    """Once in a cache folder for each rule of where a photo's exposure starts (the marker's
-    number: edit.exposure_of tells how the rule changed): the thumbnails of raw photos that
-    have no edit are deleted, and made anew when next wanted. Thumbnails of edited photos
-    (renders of the photo as it was left) stay."""
-    marker = cache / ".starts-3"
+    """Once in a cache folder for each change to how a raw photo's thumbnail is made before it
+    is edited (the marker's number): those thumbnails are deleted, and made anew when next
+    wanted. Thumbnails of edited photos (renders of the photo as it was left) stay. (Up to 3:
+    each rule of where Exposure started, which they were lifted by, catalog.py tells; 4:
+    those of Canon CR3 photos taken upright lay on their side; 5: none is lifted.)"""
+    marker = cache / ".starts-5"
     if marker.exists():
         return
     cache.mkdir(parents=True, exist_ok=True)
@@ -430,9 +398,7 @@ def thumbnail(photo: Path, key: str, folder: Path | None = None) -> Path:
     if out.exists():
         return out
     if kind_of(photo) == "raw":
-        # As the photo opens: lighter than it was shot where it has room (edit.exposure_of).
-        image = _preview(photo)
-        image = lifted(image, edit.exposure_of(edit.DEFAULTS, {"light": light_in(image)}))
+        image = _preview(photo)  # (as the photo opens: its curve shows it as this preview does)
     else:
         reader = QImageReader(str(photo))
         reader.setAutoTransform(True)

@@ -204,7 +204,9 @@ def develop_raw(path: Path, half: bool) -> tuple[dict, np.ndarray]:
         # round. It comes with what the original's camera said (dng.read).
         kept_, pixels = ours
         info = meta(path.name, pixels.shape[1], pixels.shape[0], kept_["full"])
-        info.update(raw=True, camera=kept_["camera"], light=kept_["light"], denoised=True)
+        # (Read from a file: what it says is checked as a curve the user sent would be.)
+        match = edit.clean({"curve": kept_["match"]}).get("curve")
+        info.update(raw=True, camera=kept_["camera"], match=match, denoised=True)
         return info, pixels
     import rawpy  # slow to import, and the checks run without a raw file
 
@@ -212,7 +214,7 @@ def develop_raw(path: Path, half: bool) -> tuple[dict, np.ndarray]:
         with rawpy.imread(str(path)) as raw:
             sizes = raw.sizes  # before developing, which changes them
             about = camera(raw.camera_whitebalance, raw.rgb_xyz_matrix)
-            light = light_of(raw)
+            match = match_of(raw, about)
             rgb = raw.postprocess(
                 half_size=half, gamma=(1, 1), no_auto_bright=True, output_bps=16,
                 use_camera_wb=True, output_color=rawpy.ColorSpace.Rec2020,
@@ -225,7 +227,7 @@ def develop_raw(path: Path, half: bool) -> tuple[dict, np.ndarray]:
     info = meta(path.name, rgb.shape[1], rgb.shape[0], full)
     # (With the camera's figures for the lens that was on it, where the file has them:
     # they travel with what is known of the camera, to wherever the shader's numbers are made.)
-    info.update(raw=True, camera={**about, "lens": lens.figures(path)}, light=light)
+    info.update(raw=True, camera={**about, "lens": lens.figures(path)}, match=match)
     return info, rgb
 
 

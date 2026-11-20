@@ -259,6 +259,7 @@ class Session(QObject):
         now = {key: self.history.edit.get(key, edit.DEFAULTS[key]) for key in self.LISTS}
         now["checkpoints"] = self._checkpoints()
         now["masks"] = self.masks  # (where they are on show changes with the frame, too)
+        now["curve"] = self.curve  # (at rest, the photo's own: there once the file is decoded)
         for key, value in now.items():
             if value != self._told.get(key):
                 self._told[key] = value
@@ -704,7 +705,7 @@ class Session(QObject):
 
     @Property("QVariantList", notify=curveChanged)
     def curve(self) -> list:
-        return self.history.edit.get("curve", edit.STRAIGHT)
+        return edit.curve_of(self.history.edit, self._camera)
 
     @Property("QVariantList", notify=chromaChanged)
     def chroma(self) -> list:
@@ -1080,7 +1081,7 @@ class Session(QObject):
         self.reader.start(20)
         self._info = f"{meta['name']}  ·  {self._size[0]} × {self._size[1]}"
         camera = meta["camera"] or edit.FINISHED  # no camera behind it: white moves all the same
-        self._camera = {**camera, "shot": edit.as_shot(camera), "light": meta.get("light")}
+        self._camera = {**camera, "shot": edit.as_shot(camera), "match": meta.get("match")}
         self._raw, self._denoised = meta["raw"], bool(meta.get("denoised"))
         self.refresh()
 
@@ -1150,11 +1151,10 @@ class Session(QObject):
 
     @Property("QVariantMap", notify=changed)
     def shot(self) -> dict:
-        """Where three sliders rest for this photo: the temperature and tint the camera chose,
-        and the exposure it starts with (edit.exposure_of)."""
+        """Where three settings rest for this photo: the temperature and tint the camera
+        chose, and its own tone curve (edit.curve_of)."""
         kelvin, tint = self._camera["shot"] if self._camera else (6500.0, 0.0)
-        return {"temperature": kelvin, "tint": tint,
-                "exposure": edit.exposure_of({"exposure": None}, self._camera)}
+        return {"temperature": kelvin, "tint": tint, "curve": edit.curve_of({}, self._camera)}
 
     @Property("QVariantMap", notify=changed)
     def edit(self) -> dict:
@@ -1181,9 +1181,7 @@ class Session(QObject):
 
     def _without(self, tool: str) -> dict:
         """The edit without one tool's part: its settings doing nothing, which for most is
-        their rest and for some is not (edit.IDLE: with them at rest, the Lens card's A/B
-        showed the corrections still on; the owner: "A/B doesnt seem to work on the LENS
-        card")."""
+        their rest and for some is not (edit.IDLE: a photo is sharpened a little at rest)."""
         keys = edit.TOOLS.get(tool, ())
         return {**{k: v for k, v in self.history.edit.items() if k not in keys},
                 **{k: edit.IDLE[k] for k in keys if k in edit.IDLE}}
@@ -1258,10 +1256,11 @@ class Session(QObject):
     @Slot(int, str, result="QVariantList")
     def localWhole(self, number: int, key: str) -> list:  # noqa: N802
         """Mask `number`'s own of that setting, which comes on top of the whole image's; a
-        new mask's is the setting at rest."""
+        new mask's is the setting doing nothing (a straight curve: the whole image's at rest
+        is the photo's own)."""
         masks = self.history.edit.get("masks", [])
         own = masks[number - 1].get("edit", {}) if 1 <= number <= len(masks) else {}
-        return own.get(key, edit.DEFAULTS[key])
+        return own.get(key, edit.IDLE.get(key, edit.DEFAULTS[key]))
 
     @Slot(int, str, result="QVariantList")
     def localLine(self, number: int, key: str) -> list:  # noqa: N802
@@ -1286,7 +1285,7 @@ class Session(QObject):
     @Property("QVariantList", notify=curveChanged)
     def curveLine(self) -> list:  # noqa: N802 - read from QML
         """The tone curve as heights (edit.LINE) from black to white, for drawing it."""
-        points = self.history.edit.get("curve", edit.STRAIGHT)
+        points = edit.curve_of(self.history.edit, self._camera)
         return self._once("curveLine", lambda: edit.curve_line(points))
 
     @Property("QVariantList", notify=chromaChanged)
@@ -1348,8 +1347,12 @@ class Session(QObject):
 
     @Slot("QVariantMap")
     def setEdits(self, values: dict) -> None:  # noqa: N802
-        """Several settings as one gesture (the white-balance pad moves two)."""
+        """Several settings as one gesture (the white-balance pad moves two). A tone curve that
+        is the photo's own is no change: the edit says nothing of it, as at rest (a last point
+        taken away on a photo whose own curve is straight left a change that showed none)."""
         try:
+            if "curve" in values and edit.valid("curve", values["curve"]) == self.shot["curve"]:
+                values = {**values, "curve": None}
             self.history.put(values)
         except ValueError:
             return  # not a setting, or not a value for it: nothing happens
@@ -1774,27 +1777,8 @@ class Session(QObject):
     @Property("QVariantList", notify=changed)
     def unsavedKeys(self) -> list:  # noqa: N802
         """The settings changed since the checkpoint the edit came from (edit.unsaved)."""
-        def keys() -> list:
-            found = edit.unsaved(self.points, self.history.edit, self._base)
-            if edit.standing(self.points, self.history.edit, self._base)[0] is not None:
-                return found
-            # Exposure by what it comes to, not by what the edit says: the slider's zero is
-            # 0, so at 0 it is not changed (set there by hand it stayed yellow: the edit
-            # then says 0 where at rest it says nothing); and where a photo starts lighter
-            # than shot, that start is a change no checkpoint holds yet (the owner's two
-            # wishes). Against the checkpoint the edit came from, else the newest, else 0.
-            start = self.shot["exposure"]
-
-            def comes_to(values: dict) -> float:
-                given = values.get("exposure")
-                return start if given is None else given
-
-            kept = {point["id"]: point["edit"] for point in self.points}
-            was = kept.get(self._base, self.points[-1]["edit"] if self.points else None)
-            changed = comes_to(self.history.edit) != (0.0 if was is None else comes_to(was))
-            return sorted(({*found} - {"exposure"}) | ({"exposure"} if changed else set()))
-
-        return self._once("unsaved", keys)
+        return self._once("unsaved", lambda: edit.unsaved(self.points, self.history.edit,
+                                                          self._base))
 
     @Property(bool, notify=changed)
     def unsaved(self) -> bool:
